@@ -1,0 +1,559 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>CraftSpirits — Симулятор LM-ректификации</title>
+<style>
+  :root {
+    --bg: #f1f5f9;
+    --card: #ffffff;
+    --border: #cbd5e1;
+    --ink: #0f172a;
+    --muted: #64748b;
+    --red: #dc2626;
+    --orange: #ea580c;
+    --yellow: #ca8a04;
+    --green: #16a34a;
+    --blue: #2563eb;
+    --lightblue: #0284c7;
+    --purple: #7c3aed;
+    --bg-red: #fee2e2;
+    --bg-orange: #ffedd5;
+    --bg-yellow: #fef9c3;
+    --bg-green: #dcfce7;
+    --bg-blue: #dbeafe;
+    --bg-lightblue: #e0f2fe;
+    --bg-purple: #ede9fe;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 0;
+    font: 13px/1.4 -apple-system, system-ui, "Segoe UI", Roboto, sans-serif;
+    background: var(--bg); color: var(--ink);
+  }
+  header {
+    background: #0f172a; color: white; padding: 10px 20px;
+    display: flex; align-items: center; gap: 16px;
+    border-bottom: 2px solid #1e293b;
+  }
+  header h1 { margin: 0; font-size: 16px; font-weight: 700; letter-spacing: 0.5px; }
+  header .sub { color: #94a3b8; font-size: 12px; }
+  header .right { margin-left: auto; display: flex; gap: 12px; align-items: center; }
+  header .pill {
+    padding: 3px 10px; border-radius: 12px; font-size: 11px;
+    background: #1e293b; color: white; border: 1px solid #334155;
+  }
+  header .pill.alive { background: #16a34a; }
+  header .pill.dead { background: #dc2626; }
+  main {
+    display: grid; grid-template-columns: 1fr 360px;
+    gap: 12px; padding: 12px; max-width: 1600px; margin: 0 auto;
+  }
+  section { display: grid; gap: 10px; }
+  .card {
+    background: var(--card); border-radius: 10px; padding: 12px;
+    border: 1px solid var(--border);
+  }
+  .card h2 { margin: 0 0 8px 0; font-size: 11px; letter-spacing: 1px;
+    text-transform: uppercase; color: var(--muted); font-weight: 700; }
+
+  /* Temperature cards row */
+  .temps { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
+  .temp-card {
+    padding: 10px; border-radius: 8px; border: 2px solid;
+  }
+  .temp-card .lbl { font-size: 10px; font-weight: 600; letter-spacing: 0.5px;
+    text-transform: uppercase; }
+  .temp-card .val { font: 700 28px/1 'JetBrains Mono', monospace; margin-top: 4px; }
+  .temp-card .unit { font-size: 14px; font-weight: 600; margin-left: 2px; }
+  .temp-card .sub { font-size: 10px; color: var(--muted); margin-top: 4px; }
+  .temp-card.kub { background: var(--bg-red); border-color: var(--red); color: #7f1d1d; }
+  .temp-card.head { background: var(--bg-orange); border-color: var(--orange); color: #7c2d12; }
+  .temp-card.water-in { background: var(--bg-blue); border-color: var(--blue); color: #1e3a8a; }
+  .temp-card.water-out { background: var(--bg-lightblue); border-color: var(--lightblue); color: #075985; }
+  .temp-card.nan { background: #fef2f2; border-color: #dc2626; }
+  .temp-card.nan .val { color: var(--red); font-size: 16px; padding-top: 8px; }
+
+  /* Phase badge */
+  .phase-row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+  .phase-tag {
+    display: inline-block; padding: 6px 16px; border-radius: 16px;
+    font-weight: 700; font-size: 14px; letter-spacing: 1px;
+    background: #e2e8f0; color: var(--ink); border: 2px solid #94a3b8;
+  }
+  .phase-tag[data-p="HEAT_UP"] { background: var(--bg-red); border-color: var(--red); color: #7f1d1d; }
+  .phase-tag[data-p="STABILIZE"], .phase-tag[data-p="STABILIZE2"] { background: var(--bg-yellow); border-color: var(--yellow); color: #713f12; }
+  .phase-tag[data-p="HEADS"] { background: var(--bg-orange); border-color: var(--orange); color: #7c2d12; }
+  .phase-tag[data-p="BODY"] { background: var(--bg-green); border-color: var(--green); color: #14532d; }
+  .phase-tag[data-p="TAILS"] { background: var(--bg-purple); border-color: var(--purple); color: #4c1d95; }
+  .phase-tag[data-p="SHUTDOWN"], .phase-tag[data-p="DONE"] { background: #e2e8f0; border-color: #64748b; color: #1f2937; }
+  .phase-tag[data-p="EMERGENCY"] { background: var(--red); color: white; border-color: #7f1d1d; animation: pulse 1s infinite; }
+  @keyframes pulse {
+    0%, 100% { opacity: 1; } 50% { opacity: 0.6; }
+  }
+
+  /* Output indicators */
+  .outs { display: grid; grid-template-columns: 2fr 1fr 1fr 1fr; gap: 8px; align-items: center; }
+  .led { display: inline-flex; align-items: center; gap: 6px; font-weight: 600;
+    padding: 6px 10px; border-radius: 6px; background: #f1f5f9; border: 1px solid #cbd5e1; font-size: 12px; }
+  .led-dot { width: 10px; height: 10px; border-radius: 50%; background: #94a3b8; }
+  .led.on { background: var(--bg-green); border-color: var(--green); color: #14532d; }
+  .led.on .led-dot { background: var(--green); box-shadow: 0 0 6px var(--green); }
+  .led.off-bad { background: var(--bg-red); border-color: var(--red); color: #7f1d1d; }
+
+  .power-bar { position: relative; width: 100%; height: 26px; background: #e2e8f0; border-radius: 6px;
+    overflow: hidden; border: 1px solid var(--border); }
+  .power-bar .fill { background: linear-gradient(90deg, #16a34a, #65a30d); height: 100%; transition: width 0.3s; }
+  .power-bar .lbl { position: absolute; inset: 0; display: flex; align-items: center;
+    justify-content: center; font-weight: 700; color: #064e3b; font-size: 12px; }
+
+  /* Duty cycle bar */
+  .duty-bar { width: 100%; height: 18px; background: #e2e8f0; border-radius: 4px; overflow: hidden; border: 1px solid var(--border); }
+  .duty-bar .fill { background: linear-gradient(90deg, var(--orange), var(--yellow)); height: 100%; transition: width 0.3s; }
+
+  /* Chart */
+  #chart { width: 100%; height: 280px; background: #f8fafc; border-radius: 6px;
+    border: 1px solid var(--border); }
+
+  /* Controls */
+  .btn-row { display: flex; gap: 8px; flex-wrap: wrap; }
+  button {
+    padding: 8px 14px; border-radius: 6px; border: 1px solid var(--border);
+    background: white; color: var(--ink); font-weight: 600; cursor: pointer;
+    font-size: 12px;
+  }
+  button:hover { background: #f1f5f9; }
+  button.primary { background: var(--green); color: white; border-color: #15803d; }
+  button.primary:hover { background: #15803d; }
+  button.danger { background: var(--red); color: white; border-color: #7f1d1d; }
+  button.danger:hover { background: #b91c1c; }
+  button.warning { background: var(--orange); color: white; border-color: #9a3412; }
+
+  /* Sidebar */
+  .sidebar { display: grid; gap: 10px; align-content: start; }
+
+  .field { display: flex; align-items: center; gap: 8px; font-size: 12px; }
+  .field label { min-width: 120px; color: var(--muted); }
+  .field input { width: 70px; padding: 4px 6px; border: 1px solid var(--border); border-radius: 4px;
+    font-family: monospace; }
+
+  .fault-list { display: grid; gap: 4px; max-height: 250px; overflow: auto; }
+  .fault-toggle { display: flex; align-items: center; justify-content: space-between;
+    padding: 6px 8px; background: #f8fafc; border-radius: 4px; border: 1px solid #e2e8f0;
+    font-size: 12px; cursor: pointer; }
+  .fault-toggle:hover { background: #f1f5f9; }
+  .fault-toggle.active { background: var(--bg-red); border-color: var(--red); color: #7f1d1d; font-weight: 600; }
+
+  .alerts { font-size: 11px; max-height: 200px; overflow: auto; font-family: monospace; }
+  .alert { padding: 3px 0; border-bottom: 1px solid #f1f5f9; }
+  .alert.crit { color: var(--red); font-weight: 600; }
+  .alert.warn { color: var(--orange); }
+
+  .stat-row { display: flex; justify-content: space-between; padding: 3px 0; font-size: 12px; }
+  .stat-row .lbl { color: var(--muted); }
+  .stat-row .val { font-family: monospace; font-weight: 600; }
+
+  .speed-buttons { display: flex; gap: 4px; flex-wrap: wrap; }
+  .speed-buttons button { padding: 4px 10px; font-size: 11px; }
+  .speed-buttons button.active { background: var(--blue); color: white; border-color: var(--blue); }
+</style>
+</head>
+<body>
+<header>
+  <h1>CRAFTSPIRITS · SIMULATOR</h1>
+  <span class="sub">LM-ректификация · обратный холодильник + узел отбора</span>
+  <div class="right">
+    <span class="pill" id="conn">connecting…</span>
+    <span class="pill" id="pi-status">Pi: ?</span>
+    <span class="pill" id="time-pill">t = 0:00:00</span>
+    <span class="pill" id="speed-pill">×10</span>
+  </div>
+</header>
+
+<main>
+  <section>
+    <!-- Phase + Outputs -->
+    <div class="card">
+      <h2>Фаза процесса</h2>
+      <div class="phase-row">
+        <span class="phase-tag" id="phase" data-p="IDLE">IDLE</span>
+        <span style="color: var(--muted)">в фазе: <span id="phase-elapsed" style="font-family: monospace">—</span></span>
+        <span style="color: var(--muted); margin-left: auto;">сессия: <span id="session-elapsed" style="font-family: monospace">—</span></span>
+      </div>
+    </div>
+
+    <!-- Temperatures -->
+    <div class="card">
+      <h2>Температуры</h2>
+      <div class="temps">
+        <div class="temp-card kub" id="tc-kub">
+          <div class="lbl">T КУБ</div>
+          <div><span class="val" id="t-kub">—</span><span class="unit">°C</span></div>
+          <div class="sub" id="t-kub-sub">brage</div>
+        </div>
+        <div class="temp-card head" id="tc-head">
+          <div class="lbl">T ГОЛОВА (паровая зона)</div>
+          <div><span class="val" id="t-head">—</span><span class="unit">°C</span></div>
+          <div class="sub" id="t-head-sub">до обратного холодильника</div>
+        </div>
+        <div class="temp-card water-in" id="tc-water-in">
+          <div class="lbl">T ВХ. ВОДА</div>
+          <div><span class="val" id="t-water-in">—</span><span class="unit">°C</span></div>
+        </div>
+        <div class="temp-card water-out" id="tc-water-out">
+          <div class="lbl">T ВЫХ. ВОДА</div>
+          <div><span class="val" id="t-water-out">—</span><span class="unit">°C</span></div>
+          <div class="sub" id="t-water-sub">ΔT —</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Outputs -->
+    <div class="card">
+      <h2>Выходы железа (то, что ESP пишет в GPIO)</h2>
+      <div class="outs">
+        <div>
+          <div style="font-size: 11px; color: var(--muted); margin-bottom: 4px;">МОЩНОСТЬ ТЭН</div>
+          <div class="power-bar">
+            <div class="fill" id="power-fill" style="width: 0%"></div>
+            <div class="lbl" id="power-lbl">0% · 0.0 kW</div>
+          </div>
+          <div style="font-size: 10px; color: var(--muted); margin-top: 6px;">
+            ШИМ узла отбора (duty avg)
+          </div>
+          <div class="duty-bar">
+            <div class="fill" id="duty-fill" style="width: 0%"></div>
+          </div>
+          <div style="font-size: 10px; color: var(--muted); margin-top: 2px;">
+            duty = <span id="duty-val">0%</span>
+          </div>
+        </div>
+        <div class="led" id="led-takeoff">
+          <span class="led-dot"></span><span>УЗЕЛ ОТБОРА</span>
+        </div>
+        <div class="led" id="led-water">
+          <span class="led-dot"></span><span>ВОДА</span>
+        </div>
+        <div class="led" id="led-contactor">
+          <span class="led-dot"></span><span>КОНТАКТОР</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- Chart -->
+    <div class="card">
+      <h2>Графики (последние 30 мин sim-времени)</h2>
+      <canvas id="chart" width="900" height="280"></canvas>
+      <div style="display: flex; gap: 16px; font-size: 11px; color: var(--muted); margin-top: 4px;">
+        <span><span style="display: inline-block; width: 12px; height: 3px; background: var(--red); vertical-align: middle;"></span> T_kub</span>
+        <span><span style="display: inline-block; width: 12px; height: 3px; background: var(--orange); vertical-align: middle;"></span> T_head</span>
+        <span><span style="display: inline-block; width: 12px; height: 3px; background: var(--blue); vertical-align: middle;"></span> T_water_out</span>
+      </div>
+    </div>
+
+    <!-- Statistics -->
+    <div class="card">
+      <h2>Куб и продукт</h2>
+      <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 16px;">
+        <div>
+          <div class="stat-row"><span class="lbl">V куб</span><span class="val" id="v-kub">— L</span></div>
+          <div class="stat-row"><span class="lbl">Крепость куба (об.%)</span><span class="val" id="x-kub">—</span></div>
+          <div class="stat-row"><span class="lbl">Кипит?</span><span class="val" id="is-boiling">—</span></div>
+          <div class="stat-row"><span class="lbl">Атм. давление</span><span class="val" id="p-atm">— hPa</span></div>
+          <div class="stat-row"><span class="lbl">Поток пара</span><span class="val" id="m-vapor">— g/s</span></div>
+        </div>
+        <div>
+          <div class="stat-row"><span class="lbl">V продукт</span><span class="val" id="v-prod">— L</span></div>
+          <div class="stat-row"><span class="lbl">Крепость продукта</span><span class="val" id="x-prod">—</span></div>
+          <div class="stat-row"><span class="lbl">Крепость пара (head)</span><span class="val" id="x-head">—</span></div>
+          <div class="stat-row"><span class="lbl">P на пар</span><span class="val" id="p-vapor">— kW</span></div>
+        </div>
+      </div>
+    </div>
+
+  </section>
+
+  <aside class="sidebar">
+    <!-- Session controls -->
+    <div class="card">
+      <h2>Запуск сессии</h2>
+      <div class="field"><label>Режим</label>
+        <select id="mode" style="padding: 4px 6px; border: 1px solid var(--border); border-radius: 4px;">
+          <option value="REFLUX">Ректификация (LM)</option>
+          <option value="POTSTILL">Потстил (без разделения)</option>
+        </select>
+      </div>
+      <div class="field"><label>V куба, L</label><input id="v-init" type="number" value="18" step="0.5"></div>
+      <div class="field"><label>Крепость, об.%</label><input id="x-init" type="number" value="12" step="1"></div>
+      <div class="field"><label>P_work, %</label><input id="pwork" type="number" value="60" step="5"></div>
+      <div class="field"><label>Duty heads</label><input id="duty-heads" type="number" value="0.15" step="0.05"></div>
+      <div class="field"><label>Duty body</label><input id="duty-body" type="number" value="0.40" step="0.05"></div>
+      <div class="field"><label>Duty tails</label><input id="duty-tails" type="number" value="0.70" step="0.05"></div>
+      <div class="field"><label>Stabilize, сек</label><input id="t-stable" type="number" value="600" step="60"></div>
+      <div class="btn-row" style="margin-top: 8px;">
+        <button class="primary" id="btn-start">▶ Старт сессии</button>
+        <button class="danger" id="btn-stop">■ STOP</button>
+        <button id="btn-pause">⏸ Pause</button>
+        <button id="btn-reset">⟲ Reset</button>
+      </div>
+    </div>
+
+    <!-- Speed -->
+    <div class="card">
+      <h2>Скорость симуляции</h2>
+      <div class="speed-buttons">
+        <button data-speed="0.1">×0.1</button>
+        <button data-speed="1">×1</button>
+        <button data-speed="10" class="active">×10</button>
+        <button data-speed="60">×60</button>
+        <button data-speed="300">×300</button>
+        <button data-speed="600">×600</button>
+      </div>
+      <div style="font-size: 11px; color: var(--muted); margin-top: 6px;">
+        ×60 = 1 минута реального времени = 1 час sim-времени
+      </div>
+    </div>
+
+    <!-- Faults -->
+    <div class="card">
+      <h2>Fault injection (проверка safety)</h2>
+      <div class="fault-list" id="faults">
+        <!-- буду заполнять JS -->
+      </div>
+    </div>
+
+    <!-- Alerts log -->
+    <div class="card">
+      <h2>Лог переходов и алертов</h2>
+      <div class="alerts" id="alerts">—</div>
+    </div>
+  </aside>
+</main>
+
+<script>
+const FAULT_KEYS = [
+  ["sensor_t_kub_fail",        "Датчик T_kub: NaN"],
+  ["sensor_t_head_fail",       "Датчик T_head: NaN"],
+  ["sensor_t_water_out_fail",  "Датчик T_water_out: NaN"],
+  ["valve_takeoff_stuck_open", "Клапан узла отбора: stuck OPEN"],
+  ["valve_takeoff_stuck_closed","Клапан узла отбора: stuck CLOSED"],
+  ["ssr_heater_stuck_on",      "SSR ТЭНа: пробой (всегда ON)"],
+  ["water_cutoff",             "Кран воды закрыт (нет потока)"],
+  ["estop_pressed",            "E-stop нажат"],
+  ["bimetal_tripped",          "Биметалл сработал"],
+  ["pi_disconnected",          "Pi отключен (watchdog test)"],
+];
+
+const $ = id => document.getElementById(id);
+
+function fmtT(t) {
+  if (t === null || t === undefined || Number.isNaN(t)) return "—";
+  const h = Math.floor(t / 3600);
+  const m = Math.floor((t % 3600) / 60);
+  const s = Math.floor(t % 60);
+  return `${h}:${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}`;
+}
+
+function fmtN(v, prec=1) {
+  if (v === null || v === undefined || Number.isNaN(v)) return "—";
+  return (+v).toFixed(prec);
+}
+
+// Build fault toggles
+const faultsDiv = $("faults");
+FAULT_KEYS.forEach(([key, label]) => {
+  const div = document.createElement("div");
+  div.className = "fault-toggle";
+  div.dataset.key = key;
+  div.innerHTML = `<span>${label}</span><span class="state">off</span>`;
+  div.addEventListener("click", () => toggleFault(key, !div.classList.contains("active")));
+  faultsDiv.appendChild(div);
+});
+
+async function toggleFault(key, value) {
+  await fetch("/api/fault", {
+    method: "POST", headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({ key, value })
+  });
+}
+
+async function startSession() {
+  const body = {
+    mode: $("mode").value,
+    V_kub: +$("v-init").value,
+    x_kub_abv: +$("x-init").value,
+    p_work: +$("pwork").value,
+    duty_heads: +$("duty-heads").value,
+    duty_body: +$("duty-body").value,
+    duty_tails: +$("duty-tails").value,
+    t_stable_s: +$("t-stable").value,
+  };
+  await fetch("/api/start", {
+    method: "POST", headers: {"Content-Type": "application/json"},
+    body: JSON.stringify(body)
+  });
+}
+$("btn-start").addEventListener("click", startSession);
+$("btn-stop").addEventListener("click", () => fetch("/api/stop", {method: "POST"}));
+$("btn-pause").addEventListener("click", () => fetch("/api/pause", {method: "POST"}));
+$("btn-reset").addEventListener("click", () => fetch("/api/reset", {method: "POST"}));
+
+document.querySelectorAll(".speed-buttons button").forEach(btn => {
+  btn.addEventListener("click", async () => {
+    const speed = +btn.dataset.speed;
+    await fetch("/api/speed", {
+      method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({ speed })
+    });
+    document.querySelectorAll(".speed-buttons button").forEach(b => b.classList.remove("active"));
+    btn.classList.add("active");
+  });
+});
+
+// === Chart ===
+const ctx = $("chart").getContext("2d");
+function drawChart(history) {
+  const W = ctx.canvas.width, H = ctx.canvas.height;
+  ctx.clearRect(0, 0, W, H);
+  if (!history.length) return;
+  const padL = 40, padR = 10, padT = 10, padB = 20;
+  const w = W - padL - padR, h = H - padT - padB;
+
+  const t0 = history[0].t, t1 = history[history.length - 1].t;
+  const tspan = Math.max(1, t1 - t0);
+  let ymin = 10, ymax = 105;
+
+  // axes
+  ctx.strokeStyle = "#cbd5e1"; ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(padL, padT); ctx.lineTo(padL, padT + h); ctx.lineTo(padL + w, padT + h);
+  ctx.stroke();
+  // y ticks
+  ctx.fillStyle = "#94a3b8"; ctx.font = "10px monospace";
+  for (let v = 20; v <= 100; v += 20) {
+    const y = padT + h - ((v - ymin) / (ymax - ymin)) * h;
+    ctx.fillText(String(v), 8, y + 3);
+    ctx.strokeStyle = "#e2e8f0";
+    ctx.beginPath(); ctx.moveTo(padL, y); ctx.lineTo(padL + w, y); ctx.stroke();
+  }
+  // x ticks (every N minutes)
+  ctx.fillStyle = "#94a3b8";
+  ctx.fillText(fmtT(t0), padL, H - 4);
+  ctx.fillText(fmtT(t1), padL + w - 50, H - 4);
+
+  function line(key, color) {
+    ctx.strokeStyle = color; ctx.lineWidth = 2; ctx.beginPath();
+    history.forEach((p, i) => {
+      const x = padL + ((p.t - t0) / tspan) * w;
+      const y = padT + h - Math.max(0, Math.min(1, (p[key] - ymin) / (ymax - ymin))) * h;
+      if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+    });
+    ctx.stroke();
+  }
+  line("T_kub", "#dc2626");
+  line("T_head", "#ea580c");
+  line("T_water_out", "#2563eb");
+}
+
+// === WebSocket ===
+let ws;
+function connect() {
+  ws = new WebSocket(`ws://${location.host}/ws`);
+  ws.onopen = () => { $("conn").textContent = "● live"; $("conn").classList.add("alive"); };
+  ws.onclose = () => {
+    $("conn").textContent = "● disconnected";
+    $("conn").classList.remove("alive");
+    setTimeout(connect, 1000);
+  };
+  ws.onmessage = (ev) => render(JSON.parse(ev.data));
+}
+connect();
+
+function setTemp(id, val, decimals=1) {
+  const card = $("tc-" + id);
+  const el = $("t-" + id);
+  if (val === null || Number.isNaN(val) || val === undefined) {
+    el.textContent = "SENSOR FAIL";
+    card.classList.add("nan");
+  } else {
+    el.textContent = fmtN(val, decimals);
+    card.classList.remove("nan");
+  }
+}
+
+function setLed(id, on, badIfOff=false) {
+  const el = $("led-" + id);
+  el.classList.remove("on", "off-bad");
+  if (on) el.classList.add("on");
+  else if (badIfOff) el.classList.add("off-bad");
+}
+
+function render(d) {
+  $("time-pill").textContent = "t = " + fmtT(d.t_sim_s);
+  $("speed-pill").textContent = `×${d.speed}`;
+  $("pi-status").textContent = "Pi: " + (d.pi_alive ? "ok" : "DOWN");
+  $("pi-status").className = "pill " + (d.pi_alive ? "alive" : "dead");
+
+  // Phase
+  const ph = d.controller.phase;
+  const tag = $("phase");
+  tag.textContent = ph;
+  tag.dataset.p = ph;
+  $("phase-elapsed").textContent = fmtT(d.controller.phase_elapsed_s);
+  $("session-elapsed").textContent = fmtT(d.controller.session_elapsed_s);
+
+  // Temperatures (use sensor values which respect fault injection)
+  setTemp("kub", d.faults.sensor_t_kub_fail ? null : d.physical.T_kub);
+  setTemp("head", d.faults.sensor_t_head_fail ? null : d.physical.T_head);
+  setTemp("water-in", d.physical.T_water_in);
+  setTemp("water-out", d.faults.sensor_t_water_out_fail ? null : d.physical.T_water_out);
+  const dt = d.physical.T_water_out - d.physical.T_water_in;
+  $("t-water-sub").textContent = "ΔT " + (dt >= 0 ? "+" : "") + fmtN(dt, 1) + "°C";
+  $("t-kub-sub").textContent = d.physical.is_boiling ? "🫧 кипит" : "нагрев";
+
+  // Outputs
+  const pct = (d.outputs.heater_power * 100);
+  $("power-fill").style.width = pct + "%";
+  $("power-lbl").textContent = `${fmtN(pct, 0)}% · ${fmtN(d.physical.P_heater_kW, 2)} kW`;
+  $("duty-fill").style.width = (d.physical.duty_avg * 100) + "%";
+  $("duty-val").textContent = fmtN(d.physical.duty_avg * 100, 1) + "%";
+
+  setLed("takeoff", d.outputs.valve_takeoff);
+  setLed("water", d.outputs.valve_water, /*badIfOff*/ d.controller.phase !== "IDLE" && d.controller.phase !== "DONE");
+  setLed("contactor", d.outputs.contactor_enable);
+
+  // Stats
+  $("v-kub").textContent = fmtN(d.physical.V_kub_L, 2) + " L";
+  $("x-kub").textContent = fmtN(d.physical.x_kub_abv, 1) + " %";
+  $("is-boiling").textContent = d.physical.is_boiling ? "да" : "нет";
+  $("p-atm").textContent = fmtN(d.physical.P_atm_hPa, 1) + " hPa";
+  $("m-vapor").textContent = fmtN(d.physical.m_dot_vapor_gps, 2) + " g/s";
+  $("v-prod").textContent = fmtN(d.physical.V_product_L, 3) + " L";
+  $("x-prod").textContent = fmtN(d.physical.x_product_abv, 1) + " об.%";
+  $("x-head").textContent = fmtN(d.physical.x_head_abv, 1) + " об.%";
+  $("p-vapor").textContent = fmtN(d.physical.P_to_vapor_kW, 2) + " kW";
+
+  // Faults UI sync
+  document.querySelectorAll(".fault-toggle").forEach(div => {
+    const k = div.dataset.key;
+    const active = d.faults[k];
+    div.classList.toggle("active", !!active);
+    div.querySelector(".state").textContent = active ? "ON" : "off";
+  });
+
+  // Alerts
+  const alerts = d.controller.alerts || [];
+  $("alerts").innerHTML = alerts.slice().reverse().map(a => {
+    let cls = "alert";
+    if (a.includes("EMERGENCY")) cls += " crit";
+    else if (a.includes("warn")) cls += " warn";
+    return `<div class="${cls}">${a}</div>`;
+  }).join("") || "—";
+
+  // Chart
+  drawChart(d.history || []);
+}
+</script>
+</body>
+</html>
