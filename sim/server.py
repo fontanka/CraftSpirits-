@@ -207,7 +207,13 @@ async def start(req: StartReq):
 
 @app.post("/api/stop")
 async def stop():
-    engine.controller.request_stop()
+    engine.controller.request_stop(engine.still.t_sim_s)
+    return {"ok": True}
+
+
+@app.post("/api/ack")
+async def ack_emergency():
+    engine.controller.acknowledge_emergency()
     return {"ok": True}
 
 

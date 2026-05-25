@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import math
+import random
 from dataclasses import dataclass, field
 
 
@@ -160,6 +161,7 @@ class FaultInjection:
     sensor_t_kub_fail: bool = False  # вернёт NaN
     sensor_t_head_fail: bool = False
     sensor_t_water_out_fail: bool = False
+    sensor_noise: bool = False  # ±0.5°C шум, как реальные DS18B20
     valve_takeoff_stuck_open: bool = False
     valve_takeoff_stuck_closed: bool = False
     ssr_heater_stuck_on: bool = False  # пробой триака
@@ -167,6 +169,7 @@ class FaultInjection:
     estop_pressed: bool = False
     bimetal_tripped: bool = False
     pi_disconnected: bool = False  # имитация падения Pi → ESP watchdog
+    pressure_drift: bool = False  # симулирует медленный дрейф атм. давления
 
 
 @dataclass
@@ -339,14 +342,24 @@ class Still:
         """Возвращает 'показания датчиков' с учётом fault-injection.
         Это то, что 'ESP читает с DS18B20'."""
         s = self.s
+
+        # Шум датчиков (как у реальных DS18B20: ±0.5°C, не коррелированный)
+        def noise():
+            return random.uniform(-0.5, 0.5) if self.fault.sensor_noise else 0.0
+
+        # Дрейф атмосферного давления (реалистичный: ±10 hPa за 6 часов)
+        p_atm = s.P_atm_Pa
+        if self.fault.pressure_drift:
+            p_atm += 1000 * math.sin(self.t_sim_s / 7200)
+
         sensors = {
-            "T_kub": s.T_kub if not self.fault.sensor_t_kub_fail else float("nan"),
-            "T_head": s.T_head if not self.fault.sensor_t_head_fail else float("nan"),
-            "T_water_in": s.T_water_in,
-            "T_water_out": s.T_water_out
+            "T_kub": (s.T_kub + noise()) if not self.fault.sensor_t_kub_fail else float("nan"),
+            "T_head": (s.T_head + noise()) if not self.fault.sensor_t_head_fail else float("nan"),
+            "T_water_in": s.T_water_in + noise() * 0.5,
+            "T_water_out": (s.T_water_out + noise())
             if not self.fault.sensor_t_water_out_fail
             else float("nan"),
-            "P_atm_hPa": s.P_atm_Pa / 100.0,
+            "P_atm_hPa": p_atm / 100.0,
             "is_boiling": s.is_boiling,
             "V_kub": s.V_kub,
             "V_product": s.V_product,

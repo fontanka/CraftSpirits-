@@ -296,6 +296,7 @@
         <button class="danger" id="btn-stop">■ STOP</button>
         <button id="btn-pause">⏸ Pause</button>
         <button id="btn-reset">⟲ Reset</button>
+        <button class="warning" id="btn-ack">✓ ACK Emergency</button>
       </div>
     </div>
 
@@ -336,13 +337,15 @@ const FAULT_KEYS = [
   ["sensor_t_kub_fail",        "Датчик T_kub: NaN"],
   ["sensor_t_head_fail",       "Датчик T_head: NaN"],
   ["sensor_t_water_out_fail",  "Датчик T_water_out: NaN"],
+  ["sensor_noise",             "Шум датчиков ±0.5°C"],
   ["valve_takeoff_stuck_open", "Клапан узла отбора: stuck OPEN"],
   ["valve_takeoff_stuck_closed","Клапан узла отбора: stuck CLOSED"],
-  ["ssr_heater_stuck_on",      "SSR ТЭНа: пробой (всегда ON)"],
+  ["ssr_heater_stuck_on",      "SSR ТЭНа: пробой (PZEM ловит mismatch)"],
   ["water_cutoff",             "Кран воды закрыт (нет потока)"],
   ["estop_pressed",            "E-stop нажат"],
   ["bimetal_tripped",          "Биметалл сработал"],
   ["pi_disconnected",          "Pi отключен (watchdog test)"],
+  ["pressure_drift",           "Дрейф атм. давления (±10 hPa)"],
 ];
 
 const $ = id => document.getElementById(id);
@@ -398,6 +401,7 @@ $("btn-start").addEventListener("click", startSession);
 $("btn-stop").addEventListener("click", () => fetch("/api/stop", {method: "POST"}));
 $("btn-pause").addEventListener("click", () => fetch("/api/pause", {method: "POST"}));
 $("btn-reset").addEventListener("click", () => fetch("/api/reset", {method: "POST"}));
+$("btn-ack").addEventListener("click", () => fetch("/api/ack", {method: "POST"}));
 
 document.querySelectorAll(".speed-buttons button").forEach(btn => {
   btn.addEventListener("click", async () => {
