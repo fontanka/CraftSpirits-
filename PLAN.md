@@ -16,28 +16,52 @@
 
 ## 2. Архитектура
 
+**Standalone-приложение, без зависимости от Home Assistant.** Brain в виде Python-сервиса на Raspberry Pi 4, ESP32 — «глупая» периферия с safety, локальный 7" touchscreen на щите + доступ с телефона по LAN.
+
 ```
-[ ТЭН ]──SSR(ZCD)──┐                      ┌── DS18B20 × N (1-Wire)
-[Клапан 220В]──Relay──┐                   │
-[Помпа охл.]──Relay/PWM──┐                │
-                         │                │
-                    ┌────┴────────────────┴────┐
-                    │         ESP32            │
-                    │   (ESPHome + safety)     │
-                    └────────────┬─────────────┘
-                                 │ Wi-Fi / native API
-                    ┌────────────┴─────────────┐
-                    │  Home Assistant (RPi)    │
-                    │  Lovelace UI + рецепты   │
-                    │  кастомный integration:  │
-                    │  стейт-машины режимов    │
-                    └──────────────────────────┘
+   ┌── DS18B20 × 4–6 (1-Wire)
+   │
+[ESP32-S3]──ESPHome──── Wi-Fi / native API ───┐
+   │                                           │
+   ├── SSR ТЭНа (slow PWM)                     │
+   ├── SSR клапан отбора                       │
+   ├── SSR клапан воды                         │
+   ├── Реле enable-контактора                  │
+   └── E-stop / биметалл / термопред (GPIO in) │
+                                               │
+                       ┌───────────────────────┴───────────────┐
+                       │  Raspberry Pi 4 (4 GB) + USB-SSD       │
+                       │                                        │
+                       │  CraftSpirits Controller (Python)      │
+                       │  ├── FastAPI + WebSocket               │
+                       │  ├── aioesphomeapi → ESP32             │
+                       │  ├── state machines (PotStill,         │
+                       │  │       RefluxStartStop, ...)         │
+                       │  ├── SQLite (сессии, рецепты, события) │
+                       │  └── Telegram alerts (опц.)            │
+                       │                                        │
+                       │  Web UI (Svelte + Chart.js)            │
+                       │  http://still.local:8000               │
+                       │       ▲                                │
+                       │       │                                │
+                       │  Chromium kiosk → localhost:8000       │
+                       │       │                                │
+                       └───────┼────────────────────────────────┘
+                               │ HDMI + touch
+                       ┌───────┴──────────┐
+                       │ 7" Touch Display │  ← на дверце щита
+                       └──────────────────┘
 ```
 
 **Разделение ответственности — критично для безопасности:**
 
-- **ESP32 (ESPHome)** — единственный, кто физически управляет реле. Знает только примитивы: «выставь мощность ТЭНа N%», «открой клапан», «помпа M%». Имеет независимые safety-инварианты, которые отрубают железо при их нарушении даже без команды сверху.
-- **Home Assistant** — высокоуровневая логика режимов, рецепты, UI. Падение HA не должно приводить к небезопасному состоянию: ESP должен сам уйти в safe state по watchdog.
+- **ESP32 (ESPHome)** — единственный, кто физически управляет SSR/реле. Знает только примитивы: «выставь мощность ТЭНа N%», «открой клапан». Имеет независимые safety-инварианты, которые отрубают железо при их нарушении даже без команды сверху.
+- **Raspberry Pi 4 (CraftSpirits Controller)** — высокоуровневая логика режимов, рецепты, история, UI. Падение Pi не должно приводить к небезопасному состоянию: ESP должен сам уйти в safe state по watchdog (нет команды > 30 сек).
+- **Touchscreen** — это просто браузер, открытый на `localhost:8000`. Падение Chromium не влияет на ничего, кроме UI.
+
+**Почему не Home Assistant**: standalone делает систему независимой от HA-обновлений, упрощает развёртывание (один Docker образ или systemd-юнит), позволяет упаковать как готовый продукт. Минус — теряем «бесплатные» интеграции HA (но Telegram и базовый веб-доступ делаем сами).
+
+**Почему именно ESPHome на ESP32** (а не своя прошивка): YAML-конфиг вместо C++, OTA из коробки, отлаженные драйверы DS18B20/BME280/slow-PWM, официальный Python-клиент `aioesphomeapi` для разговора с Pi.
 
 ## 3. BOM (Bill of Materials)
 
@@ -57,11 +81,17 @@
 
 | Компонент | Модель / параметры | Кол-во | Примечание |
 |---|---|---|---|
-| Контроллер | ESP32-S3-DevKitC-1, любая из вариаций N8R2/N8R8/N16R8 | 1 | **С заводски припаянными** штырьковыми гребёнками (стандарт). Используемые GPIO безопасны на всех вариантах. |
+| Brain | **Raspberry Pi 4 (4 GB) + блок питания 5В 3А USB-C** + корпус с пассивным радиатором | 1 | Запускает CraftSpirits Controller (Python). 4 GB достаточно с большим запасом. |
+| Хранилище Pi | **USB 3.0 SSD 64–128 GB** (Samsung T7, Kingston DT80, Crucial X6) + USB-C ↔ USB-A кабель | 1 | Не SD-карта: SSD надёжнее в ~10× для 24/7 работы. SD карту можно как fallback recovery. |
+| ОС-карта (резерв) | microSD 32 GB Class 10, A2 | 1 | Для первой установки и как backup |
+| Touchscreen | **Raspberry Pi 7" Touch Display 2** (официальный, 720×1280) или 7"/10" HDMI+USB-touch с поддержкой Linux | 1 | Официальный подключается через DSI + питается от Pi. HDMI-варианты тоже работают. |
+| Крепление touchscreen | Корпус-рамка с креплением на дверцу DIN-щита или отдельная VESA-крепёжка | 1 | Подбирается под щит. |
+| Контроллер ESP | ESP32-S3-DevKitC-1, любая из вариаций N8R2/N8R8/N16R8 | 1 | **С заводски припаянными** штырьковыми гребёнками. Используемые GPIO безопасны на всех вариантах. |
 | Screw shield для ESP | Expansion board под ESP32-S3-DevKitC-1, **44-pin** (не 38-pin от классического ESP32) с винтовыми клеммами на все GPIO | 1 | Поиск AliExpress: `ESP32-S3 DevKitC-1 expansion board screw terminal`. После него все GPIO — клеммы. |
-| БП логики | **Mean Well IRM-15-5** (5В 3А DIN) | 1 | DIN-rail, винтовые клеммы, изолированный. |
+| БП логики (ESP+реле) | **Mean Well IRM-15-5** (5В 3А DIN) | 1 | DIN-rail, винтовые клеммы, изолированный. Pi питается отдельно от своего БП через USB-C. |
+| Wi-Fi роутер | Любой существующий в доме | — | ESP32 ↔ Pi общаются по Wi-Fi (или Ethernet, если повезло с проводкой). Без интернета работают, только LAN. |
 | LDO 3.3В | На борту DevKitC-1 (AMS1117) | — | Хватает для ESP + DS18B20 + BME280. |
-| Корпус | DIN-щит наружного монтажа на 12–18 модулей, IP54 | 1 | Перфорация под кабель датчиков. |
+| Корпус | DIN-щит наружного монтажа на 12–18 модулей, IP54, **с прозрачной/металлической дверцей под touchscreen** | 1 | Перфорация под кабель датчиков. Дверца с вырезом под 7" экран — можно проще: смонтировать дверцу с большим окном и закрепить дисплей изнутри. |
 
 ### Силовая часть (под 3–5 кВт, однофазный ТЭН)
 
@@ -148,54 +178,137 @@
 
 ## 5. Программный стек
 
+Standalone, два уровня: **ESPHome на ESP32** (firmware) + **CraftSpirits Controller на Pi 4** (Python-сервис с веб-UI).
+
 ### 5.1 ESPHome-прошивка (`firmware/esp32-still.yaml`)
 
-Делает только то, что обязано:
+Делает только то, что обязано — никакой высокоуровневой логики:
 
 - читает все датчики (DS18B20 + BME280) с периодом 1 с;
-- публикует sensor entities в HA через native API;
-- принимает команды: `set_heater_power` (0-100%), `valve` (on/off), `pump_power` (0-100%), `enable_contactor` (on/off);
-- ШИМ ТЭНа через `ac_dimmer` компонент (он умеет cycle-skipping для медленных нагрузок);
-- **safety automations** (выполняются на самом ESP, без HA):
-  - watchdog: если нет валидной команды от HA > 30 с → heater=0, valve=closed, contactor=off, beep;
+- публикует sensor entities через **ESPHome native API** (Pi слушает через `aioesphomeapi`);
+- принимает команды: `set_heater_power` (0–100%), `valve_отбора` (on/off), `valve_воды` (on/off), `enable_contactor` (on/off), `beep` (ms);
+- ШИМ ТЭНа через **slow PWM** на GPIO → SSR, период 2–5 сек (для термической инерции это правильнее, чем фазовая регулировка);
+- **safety automations** (выполняются на самом ESP, **без Pi**):
+  - watchdog: если нет валидной команды от Pi > 30 с → heater=0, valve=closed, contactor=off, beep;
   - T куба > `max_kub_temp` (по умолчанию 105°C) → heater=0;
   - T любого критичного датчика == NaN или вне диапазона `(-10, 130)` дольше 5 с → heater=0;
   - E-stop input == low → heater=0, valve=closed, contactor=off;
-  - при загрузке: всё в safe state, контактор включается только по явной команде.
+  - при загрузке: всё в safe state, контактор включается только по явной команде Pi.
 
-### 5.2 Home Assistant — кастомная интеграция `custom_components/craftspirits/`
+### 5.2 CraftSpirits Controller — Python-сервис на Pi (`controller/`)
 
-Стейт-машина режимов на Python. Почему интеграция, а не YAML-automations: для старт-стопа нужны временные ряды, скользящие производные, гистерезисы — это в YAML превращается в нечитаемую кашу.
+Один процесс, один Docker-контейнер (или systemd-юнит). Архитектура:
 
 ```
-custom_components/craftspirits/
-├── __init__.py           # setup, координатор
-├── manifest.json
-├── const.py
-├── coordinator.py        # подписка на sensor states ESP
-├── modes/
-│   ├── base.py           # абстрактная Mode (enter/tick/exit, transitions)
-│   ├── potstill.py       # дистилляция
-│   ├── reflux_startstop.py
-│   ├── reflux_pwm.py
-│   └── dephlegmator_pid.py
-├── safety.py             # барокоррекция, плавность setpoint
-├── recipe.py             # загрузка/сохранение JSON рецептов
-├── services.yaml         # craftspirits.start_mode / stop / change_phase
-└── translations/{en,ru}.json
+controller/
+├── pyproject.toml
+├── craftspirits/
+│   ├── __init__.py
+│   ├── main.py              # FastAPI app, lifespan
+│   ├── config.py            # pydantic-settings, .env
+│   ├── esp/
+│   │   ├── client.py        # aioesphomeapi wrapper, reconnect-loop
+│   │   └── entities.py      # маппинг sensor/switch ESPHome → внутренние имена
+│   ├── modes/
+│   │   ├── base.py          # абстрактная Mode (enter/tick/exit, transitions)
+│   │   ├── potstill.py      # дистилляция
+│   │   ├── reflux_startstop.py
+│   │   ├── reflux_pwm.py
+│   │   └── dephlegmator_pid.py
+│   ├── safety/
+│   │   ├── watchdog.py      # дублирует ESP-watchdog с Pi-стороны
+│   │   ├── pressure.py      # барокоррекция по BME280
+│   │   └── ramp_limiter.py
+│   ├── storage/
+│   │   ├── db.py            # SQLite через SQLAlchemy 2.0 async
+│   │   ├── models.py        # Session, Event, Recipe, Calibration
+│   │   └── migrations/      # alembic
+│   ├── api/
+│   │   ├── rest.py          # FastAPI endpoints для UI
+│   │   ├── ws.py            # WebSocket live-stream (T, состояния, фаза)
+│   │   └── auth.py          # простая HTTP basic / LAN-only по умолчанию
+│   ├── notifications/
+│   │   └── telegram.py      # опц., через python-telegram-bot
+│   ├── recipes/
+│   │   ├── loader.py        # JSON в БД и обратно
+│   │   └── builtin/         # дефолтные пресеты
+│   └── tests/
+│       ├── modes/           # unit-тесты стейт-машин
+│       ├── safety/
+│       └── fixtures/        # фейковый ESP для интеграционных тестов
 ```
 
-### 5.3 Lovelace UI
+Ключевые библиотеки:
+- **FastAPI** 0.115+ — REST + WebSocket
+- **aioesphomeapi** 25+ — официальный клиент ESPHome native API
+- **SQLAlchemy** 2.0 async + **aiosqlite** — хранение
+- **APScheduler** — таймеры состояний (опционально, или просто `asyncio.sleep`)
+- **pydantic-settings** — конфиг через `.env`
+- **structlog** — лог в JSON
+- **python-telegram-bot** v21 (опц.)
 
-Дашборд с:
-- большой график T(куба) / T(царги) / мощность / клапан;
-- текущая фаза + время в фазе;
-- крупные кнопки: «Стоп», «Перейти к телу», «Перейти к хвостам», «Готово»;
-- настройки порогов (свернуто).
+### 5.3 Веб-UI (`ui/`)
+
+Отдельный пакет, билдится в статику, FastAPI отдаёт.
+
+```
+ui/
+├── package.json             # Svelte 5 + Vite + Chart.js
+├── vite.config.js
+├── src/
+│   ├── App.svelte
+│   ├── lib/
+│   │   ├── ws.js            # WebSocket-стор с автореконнектом
+│   │   ├── api.js           # REST-вызовы
+│   │   └── stores/
+│   │       └── session.js
+│   ├── routes/
+│   │   ├── Run.svelte       # экран 1 (главный во время сессии)
+│   │   ├── Start.svelte     # экран 2 (выбор режима / старт)
+│   │   ├── Tests.svelte     # экран 3 (калибровка, dry-test)
+│   │   └── History.svelte   # экран 4 (список прошлых сессий + графики)
+│   └── components/
+│       ├── BigTempCard.svelte
+│       ├── ChartStrip.svelte
+│       ├── ValveIndicator.svelte
+│       └── BigStopButton.svelte
+└── dist/                    # билд, отдаётся FastAPI как static
+```
+
+**Почему Svelte**: маленький бандл (~30 KB рантайм), нет виртуального DOM, простой синтаксис, хорошо работает на Pi-touchscreen без тормозов. Альтернативы — Vue 3 или просто Alpine.js + HTMX (ещё проще, но менее интерактивно для графиков).
+
+Touchscreen-режим: Chromium запускается в kiosk-mode при загрузке Pi → `chromium-browser --kiosk --noerrdialogs http://localhost:8000/run`. Указатель мыши прячется, виртуальной клавиатуры нет (для ввода чисел будут стандартные `<input type="number">` со steppers).
 
 ### 5.4 Симулятор для разработки (`sim/`)
 
-Простая модель куба+царги (тепловой баланс + уравнение Антуана для бинарной смеси этанол-вода) на Python. Позволяет крутить стейт-машины без железа. Запускается как FastAPI, эмулирует ESPHome native API.
+Простая модель куба+царги (тепловой баланс + уравнение Антуана для бинарной смеси этанол-вода) на Python. **Симулирует ESPHome native API**, чтобы Controller не отличал реальное железо от симулятора. Позволяет разрабатывать стейт-машины и UI на ноутбуке без Pi и ESP.
+
+```
+sim/
+├── still_model.py           # ODE-решатель: масса, тепло, состав
+├── fake_esphome.py          # asyncio-сервер, говорит aioesphomeapi-протокол
+├── scenarios/
+│   ├── normal_potstill.py
+│   ├── sensor_dropout.py
+│   ├── stuck_ssr.py
+│   └── network_loss.py
+└── run.py                   # `python -m sim.run` — слушает на :6053
+```
+
+### 5.5 Развёртывание на Pi (`deploy/`)
+
+```
+deploy/
+├── pi-image/
+│   ├── README.md            # как залить базовый Raspberry Pi OS Lite 64-bit
+│   ├── first-boot.sh        # cloud-init / first-boot скрипт
+│   └── kiosk.service        # systemd для Chromium kiosk
+├── controller.service       # systemd для CraftSpirits Controller
+├── docker-compose.yml       # альтернатива systemd
+└── Dockerfile               # multi-stage: ui build + controller
+```
+
+Обновления: `git pull && systemctl restart craftspirits-controller` или `docker compose pull && up -d`. OTA для ESP32 — стандартный ESPHome.
 
 ## 6. Алгоритмы режимов
 
@@ -224,7 +337,7 @@ INIT → HEAT_UP → STABILIZE_TR → HEADS → BODY → TAILS → SHUTDOWN
 - `TAILS`: открыть полностью либо в другую ёмкость (опц. второй клапан), до T_kub ≥ `t_kub_stop`.
 - `SHUTDOWN`: heater=0, valve=closed.
 
-Все пороги — числа в HA (input_number entities), редактируются из UI, сохраняются в рецепте.
+Все пороги — поля в JSON-рецепте в БД, редактируются из UI, версионируются (каждое изменение — новая ревизия рецепта).
 
 ### 6.3 ШИМ-отбор
 
@@ -239,13 +352,13 @@ INIT → HEAT_UP → STABILIZE_TR → HEADS → BODY → TAILS → SHUTDOWN
 - [x] Аппаратный термопредохранитель + биметалл-аварийник в силовой цепи (независимо от ESP).
 - [x] E-stop разрывает силовую цепь физически.
 - [x] Силовой контактор как «общий выключатель», управляется отдельным реле ESP.
-- [x] Watchdog в ESPHome: потеря HA = safe state.
+- [x] Watchdog в ESPHome: потеря связи с Pi > 30 с = safe state (heater=0, valve=closed, contactor=off).
 - [x] Контроль обрыва/КЗ датчика T куба → safe state.
 - [x] Гистерезис и rate-limit на изменение мощности (не дёргаем SSR).
 - [x] УЗО 30 мА на вводе.
 - [x] Гальваническая развязка управляющих реле от ESP (opto-isolated модули).
 - [x] При первом запуске после reset — всегда safe state, ручная активация контактора.
-- [x] Журналирование всех аварий в HA с timestamp.
+- [x] Журналирование всех аварий в БД на Pi с timestamp (таблица `events`).
 
 ## 8. Структура репозитория
 
@@ -259,25 +372,39 @@ CraftSpirits-/
 │   └── packages/
 │       ├── safety.yaml              safety automations
 │       └── sensors.yaml             датчики
-├── custom_components/
-│   └── craftspirits/                HA integration
-├── lovelace/
-│   └── dashboard.yaml
-├── recipes/
-│   ├── sugar_wash.json
-│   └── grain.json
-├── sim/
+├── controller/                      Python-сервис на Pi
+│   ├── pyproject.toml
+│   ├── craftspirits/                (см. секцию 5.2 для деталей)
+│   └── tests/
+├── ui/                              Svelte web-UI (см. секцию 5.3)
+│   ├── package.json
+│   ├── src/
+│   └── dist/                        (билд)
+├── sim/                             Симулятор железа (секция 5.4)
 │   ├── still_model.py
 │   ├── fake_esphome.py
 │   └── scenarios/
+├── deploy/                          Развёртывание на Pi (секция 5.5)
+│   ├── pi-image/
+│   ├── controller.service
+│   ├── kiosk.service
+│   ├── docker-compose.yml
+│   └── Dockerfile
+├── recipes/                         Готовые пресеты (загружаются в БД при старте)
+│   ├── sugar_wash.json
+│   ├── grain.json
+│   └── default_potstill.json
 ├── hardware/
-│   ├── schematic.kicad_sch          (опционально, для платы переходника)
+│   ├── wiring_diagram.md            ASCII / Mermaid схема силовой
 │   ├── pinout.md
+│   ├── bom.md                       (= секция 3 этого плана, для быстрого доступа)
 │   └── photos/
 └── docs/
     ├── safety.md
     ├── calibration.md               как калибровать DS18B20 в кипящей воде
-    └── recipes_format.md
+    ├── recipes_format.md
+    ├── pi_setup.md                  установка ОС, kiosk-mode, network
+    └── ui_screens.md                эскизы UI (= те ASCII, что я давал)
 ```
 
 ## 9. Дорожная карта
@@ -285,30 +412,48 @@ CraftSpirits-/
 ### Phase 0 — план (сейчас)
 - [x] Этот документ.
 
+### Phase 0.5 — настройка Pi (полдня)
+- [ ] Залить Raspberry Pi OS Lite 64-bit на USB-SSD (через `rpi-imager`).
+- [ ] Boot order: SSD-first (`raspi-config` → Advanced → Boot order).
+- [ ] Wi-Fi/Ethernet, статический IP или mDNS-имя `still.local`.
+- [ ] SSH, обновления, базовые пакеты (git, python 3.12, docker — опционально).
+- [ ] Опционально: VNC для удалённой настройки до подключения touchscreen.
+
 ### Phase 1 — железо на столе (1–2 недели)
-- [ ] Собрать минимальный стенд: ESP32 + 2× DS18B20 + одно реле + светодиод.
-- [ ] ESPHome конфиг с публикацией T и управлением реле из HA.
-- [ ] Калибровка DS18B20 в кипящей воде + ice bath.
+- [ ] Собрать минимальный стенд: ESP32-S3 + screw shield + 2× DS18B20 + BME280 + LED.
+- [ ] ESPHome конфиг с публикацией T и состояний выходов.
+- [ ] Тестовый Python-скрипт на Pi: подключение через `aioesphomeapi`, чтение значений.
+- [ ] Калибровка DS18B20 в кипящей воде + ice bath, запись offset в БД.
 
-### Phase 2 — safety и силовая (1 неделя)
-- [ ] Собрать силовой узел с контактором, термопредохранителем, E-stop.
-- [ ] Прогон без нагрузки: проверка всех safety-триггеров.
-- [ ] AC-диммер на лампочке-нагрузке 100 Вт, проверка PWM.
+### Phase 2 — Controller v0 + UI v0 (2 недели)
+- [ ] Скелет FastAPI + WebSocket + SQLite.
+- [ ] Скелет Svelte UI: один экран `Run`, читает live-данные с ESP через бэк.
+- [ ] Системные сервисы (systemd) для controller и chromium kiosk.
+- [ ] Боевая подача 5В на ESP, 3.3В на датчики — тест end-to-end на воде.
 
-### Phase 3 — потстил (1 неделя)
-- [ ] Реализация `PotstillMode` в HA integration.
+### Phase 3 — safety + силовая (1 неделя)
+- [ ] Собрать силовой узел: контактор, SSR, термопред, биметалл, E-stop.
+- [ ] **Dry tests** (см. секцию 11 и план тестов): лампа 100 Вт вместо ТЭНа, LED вместо клапанов.
+- [ ] Проверка watchdog'а: отключить Pi → ESP должен сам уйти в safe state.
+
+### Phase 4 — потстил (1 неделя)
+- [ ] Реализация `PotstillMode` в Controller.
 - [ ] Симулятор + unit-тесты переходов.
+- [ ] UI: экран `Start` с выбором режима, pre-flight check.
 - [ ] Боевой прогон на воде (без браги), оценка задержек.
 
-### Phase 4 — ректификация старт-стоп (2–3 недели)
+### Phase 5 — ректификация старт-стоп (2–3 недели)
 - [ ] `RefluxStartStopMode` + UI с фазами.
+- [ ] Экран `History` с архивом сессий.
 - [ ] Прогон на спирт-сырце.
 - [ ] Подбор `t_stable`, `t_open_*`, `t_pause_*` под вашу колонну.
 
-### Phase 5 — улучшения
+### Phase 6 — улучшения
 - [ ] ШИМ-отбор и PID дефлегматора.
-- [ ] Барокоррекция.
-- [ ] Голосовые уведомления через HA, mobile push, веб-доступ.
+- [ ] Барокоррекция по BME280.
+- [ ] Telegram-бот: уведомления + базовое управление командами.
+- [ ] Touchscreen polish: размер кнопок под палец, тёмная тема ночью.
+- [ ] Docker-образ и инструкция «отдай другу винокуру».
 - [ ] Опционально — отдельный режим «бражной колонны».
 
 ## 10. Открытые вопросы
@@ -327,7 +472,17 @@ CraftSpirits-/
 
 **Главное правило при заказе: все модули должны быть В СБОРЕ, не «kit». Ищите фото готовой платы с распаянными компонентами и винтовыми клеммами.**
 
-### С AliExpress / Amazon
+### Хост-машина (Pi + дисплей)
+
+- [ ] **Raspberry Pi 4 Model B, 4 GB** + БП 5В 3А USB-C официальный + пассивный радиатор-корпус (FLIRC или Argon NEO) — 1 шт
+- [ ] **USB 3.0 SSD 64–128 GB** (Samsung T7 / Kingston DT80 / Crucial X6) + USB-A ↔ USB-C кабель — 1 шт
+- [ ] **microSD 32 GB Class 10, A2** (recovery + первая установка) — 1 шт
+- [ ] **Raspberry Pi 7" Touch Display 2** (DSI) или эквивалент HDMI+USB-touch 7"/10" с подтверждённой Linux-поддержкой — 1 шт
+- [ ] **Шлейф DSI и кабели питания дисплея** (обычно в комплекте с официальным дисплеем) — комплект
+- [ ] **Крепление дисплея на дверцу щита** или отдельная VESA-рамка — 1 шт
+- [ ] **Короткий HDMI-кабель + клавиатура USB** для первой настройки (можно одолжить) — 1 раз
+
+### С AliExpress / Amazon (электроника управления)
 
 - [ ] **ESP32-S3-DevKitC-1** (любая память), с заводски припаянными штырьками — 1 шт
 - [ ] **Screw terminal expansion board под ESP32-S3-DevKitC-1 (44-pin)** — 1 шт. Запрос: `ESP32-S3 DevKitC-1 expansion board screw terminal` или `ESP32-S3 N16R8 screw shield`. **Сверьте ширину/число пинов с фото DevKit** — это критично, не путать с 38-pin от классики.
