@@ -944,7 +944,258 @@ BrewPi — самая известная open-source платформа для �
 - [ ] **TODO V2**: рассмотреть сервопривод на дроссельном клапане отбора для constant-ABV режима (после первых 5–10 успешных сессий с bang-bang)
 - [ ] **TODO опц.**: MQ-3 газоанализатор на отдельный GPIO для предупреждения о парах — Phase 6
 
-### 12.11 Источники
+### 12.11 Глубокий ресёрч второй волны (для калибровки симулятора)
+
+Шесть параллельных исследовательских проходов — русские форумы, английские форумы, гидродинамика колонны, failure modes клапанов, DS18B20/BME280 pitfalls, state-machine best practices. Все находки сразу с привязкой «как смоделировать в sim, чтобы можно было гонять решения».
+
+#### 12.11.1 Гидродинамика колонны и захлёб (количественно)
+
+Формулы и численные диапазоны для нашей насадочной колонны (1.5"/2", SPN или мешка, высота ~1 м):
+
+| Параметр | Формула / источник | Наша колонна (5 кВт) |
+|---|---|---|
+| Vapor velocity | `v = (Q/ΔH_vap)/(ρ_v·A)` | 1.5" → **3.6 м/с**, 2" → 2.0 м/с |
+| F-factor / Cv | `Cv = v / v_flood`; `v_flood` из Sherwood-Eckert | **1.5" → Cv=0.7–0.85 (опасно!)**, 2" → Cv=0.4–0.5 (запас) |
+| Δp dry | Ergun `150μv(1-ε)²/dp²ε³` | SPN 1.5": **2–5 мбар/м** |
+| Δp wet | Leva `Δp_dry·10^(βL)` | **5–15 мбар/м** в рабочем режиме |
+| Δp pre-flood | `Δp_baseline + 30–50%` за 5–15 мин до захлёба | **25–40 мбар/м** = warning |
+| HETP @ Cv=0.5–0.7 | Bravo-Fair | **4–7 см** (оптимум) |
+| HETP @ Cv<0.3 или near flood | Mackowiak | **10–15 см** (деградация) |
+| Hold-up dynamic | Mackowiak | **150–300 мл**, τ_column 3–8 мин |
+| Weeping threshold | `v < v_min_wet` | Q < **1.2–1.5 кВт** для 1.5" SPN |
+| Flood oscillation | дисперсия T_bottom | ±0.3 °C @ **0.05–0.2 Гц** |
+| Foam carryover signature | `dT_head/dt > 0.1 °C/с` + `dABV_head/dt < -0.5 %/с` + Δp spike | детект-окно ~30–90 с |
+
+**Решение под проверку sim**: при 5 кВт 1.5" колонна работает на грани захлёба (Cv 0.7–0.85). Если sim покажет это в реальной сессии — нужен переход на 2".
+
+**Источники для формул**: McCabe-Smith-Harriott Unit Operations гл. 18, 22; Mackowiak *Fluid Dynamics of Packed Columns* (Springer 2010); Billet-Schultes (1999) HETP correlation; Stichlmair-Bravo-Fair (1989) flooding; Sinnott Chemical Engineering Design vol. 6.
+
+#### 12.11.2 Multi-component VLE (не бинарный!)
+
+Критическое открытие с английских форумов (homedistiller.org/wiki/Cuts, треды 79915, 26117): **T_head non-monotonic** при переходе heads → hearts, потому что головы (acetone BP 56 °C, MeOH BP 64.7 °C, acetaldehyde BP 20 °C) лежат **ниже** этанола, а хвосты (1-propanol 97, isoamyl 132, acetic 118) **выше**.
+
+Следствие: ловить «конец голов» по абсолютной T_head ненадёжно. Правильно:
+- `d(ABV_takeoff)/dt < threshold` (продукт стабилизируется)
+- `d(T_takeoff - T_vapor_column)/dt → 0` (subcool затухает)
+
+Sim должен моделировать **минимум 5 компонентов**: methanol, ethanol, water, 1-propanol, isoamyl. Каждый со своим уравнением Antoine, начальной массовой долей в браге, расчётом equilibrium через `P_total = ΣP_i·x_i`. Это намного сложнее бинарного, но без этого «heads cut detection» проверить нельзя.
+
+#### 12.11.3 Two-node boiler model (puking и dry-out)
+
+Из англо форумов (HD 93650, 76686, 79475): immersion-ТЭН в браге → **верхний слой достигает BP раньше bulk** → film boiling → surging → wash попадает на термоколодец → **ghost readings** (грязный датчик меряет brewery muck, не пар).
+
+Модель куба:
+```
+[Bulk liquid] ── convective exchange (h↓ с viscosity/solids) ── [Top film]
+       │                                                              │
+   T_bulk, m_bulk                                              T_film (раньше кипит)
+       │                                                              │
+   ТЭН погружён в bulk                                  surging → puking events
+```
+
+Параметры:
+- `viscosity_factor` (1.0 для воды-спирта, 2–4 для зерновой/фруктовой браги, 5+ для густой)
+- `solids_fraction` (0 для чистой, 0.05–0.15 для злаков)
+- `h_convective` падает с этими двумя
+- `puke_probability_per_min` растёт когда `(T_film - T_bulk) > 3°C`
+- `probe_fouling`: после puke event — bias на верхнем датчике +N°C на M минут
+
+**Dry-out** из русских форумов:
+- `dT_kub/dt > 1 °C/мин` при включённом ТЭНе = индикатор
+- `(T_kub_wall - T_kub_liquid) > 10 °C` = сухой ТЭН (если есть оба датчика)
+- В момент `V_liquid → 0` теплоёмкость падает скачком → T улетает
+
+#### 12.11.4 Sentinel-значения DS18B20 (магические числа)
+
+Из ресёрча DS18B20 (cpetrich/counterfeit_DS18B20, Tasmota issue 9640, БКУ-099):
+
+| Значение | Что значит | Sim flag |
+|---|---|---|
+| **-127.0** (raw 0xFC90) | Сенсор молчит / нет CRC / прошивка не записала EEPROM | `disconnected = True` |
+| **85.0000** (raw 0x0550) **точно** | Power-on reset OR VDD glitch при convert. **Распознаётся точностью**: валидные 85±0.5 vs ровно 85.0000 | `early_read_p`, `power_glitch_p` |
+| **CRC fail** | Проблема шины, EMI, длинный кабель | кластеризуется в 1мс окно вокруг SSR switching events |
+
+Алгоритм для контроллера:
+```python
+def is_valid_ds18b20(raw_C):
+    if raw_C == -127.0: return False  # disconnected
+    if raw_C == 85.0000 and abs(raw_C - last_valid) > 5: return False  # power-on
+    if abs(raw_C - last_valid) > MAX_DT_DT * dt: return False  # impossible jump
+    return True
+```
+
+Plus: **счётчики per-sensor** (CRC fail rate, sentinel rate, jump rate). Если один сенсор имеет >5× больше fails чем остальные — это «далёкий» или дохлый.
+
+#### 12.11.5 Counterfeit DS18B20 — 6 семейств
+
+Известных подделок: A1, A2, B1, B2, C, D1 ([cpetrich/counterfeit_DS18B20](https://github.com/cpetrich/counterfeit_DS18B20)):
+
+- ROM pattern fakes: `28-xx-xx-xx-xx-00-00-xx` (середина нулевая)
+- **Зависают на 0 °C crossing** (некоторые семейства)
+- **Шум σ в 2–10 раз выше** оригинала (детект статистически)
+- **Не сохраняют EEPROM** (Tlow/Thigh регистры): тест provision = write + read after power cycle
+- Drift 1–2 °C/год (vs 0.1–0.5 для оригинала) + step changes при thermal shock
+
+В sim модель `counterfeit_family` enum с разными параметрами шума, дрейфа, и hang-at-zero-crossing.
+
+#### 12.11.6 Valve state vector (15 переменных на клапан)
+
+Из ресёрча failure modes (Burkert, ASCO, ProtoSupplies, Lee Co, плюс homedistiller форумы):
+
+```python
+@dataclass
+class ValveState:
+    # Динамика
+    lift_fraction: float = 0.0  # [0..1] фактическое положение
+    open_delay_ms: float = 30   # задержка реакции, растёт с износом
+    close_delay_ms: float = 20
+
+    # Износ/возраст
+    cycle_count: int = 0
+    seal_wear: float = 0.0      # 0..1, износ уплотнения
+    insulation_age: float = 0.0 # Arrhenius decay катушки
+
+    # Тепловой режим
+    T_coil_C: float = 25
+    coil_class: str = "B"       # B=130°C, F=155°C
+
+    # Загрязнение
+    seat_debris: bool = False   # частица на седле, leak
+    scale_mass_g: float = 0.0   # минеральные отложения (water valve)
+    stiction_force_N: float = 0.0  # binding после простоя
+
+    # Проблемы электрики
+    V_supply: float = 230.0     # просадка → buzz
+    contact_resistance_ohm: float = 0.01  # DIN 43650 коррозия
+    snubber_present: bool = True  # без него — kickback damage
+
+    # Параметры flow
+    Cv_effective: float = 1.0   # дрейфует ~×1.5 при heat soak (БКУ takeoff)
+    leak_rate_ml_s_when_closed: float = 0.0
+
+    # Здоровье общее
+    coil_health: float = 1.0    # 0.0 = burned out
+```
+
+**Failure modes** (как раскрыты):
+1. Dribble — FKM свелл, leak при cmd=closed → растёт ABV в product при паузах
+2. Particle bypass — стохастический, P=0.3 self-clear после next cycle
+3. Sluggish — `open_delay` растёт со временем
+4. Stuck after long-off — calcium на штоке после `>N часов простоя`
+5. Coil thermal drop-out — `if T_coil > T_class → coil_health -= dt/τ_aging`
+6. Chatter at low V — `if V < 0.85·V_nom → lift_fraction осциллирует @100Гц`
+7. Inrush burnout — `if lift < min and t_energized > 2s → coil_dead`
+8. Inductive kickback — каждый switching event без snubber: `insulation_damage += spike_energy`
+9. Terminal corrosion — Bernoulli `contact_open ~ p(humidity, age)`
+10. Water hammer — каждый close event: `seat_wear += ΔP_hammer/E_seat`
+11. **БКУ heat soak**: `Cv_effective(t) = Cv_0 · (1 + α·(T_coil - T_ref))` — flow drifts up ×1.5 после 2ч!
+12. MTBC: ASCO premium 10M циклов, generic 300k. Weibull k≈2
+
+**Killer insight**: 70-80 % отказов происходят **в момент переключения** (inrush, hammer, kickback). Sim должен катать кости на **каждый edge**, а не раз в N секунд.
+
+#### 12.11.7 Best practices state machine (для нашего кода)
+
+Из обзора (controleng, Astrom-Wittenmark, Memfault, Ganssle):
+
+| Pattern | Что | Проверка |
+|---|---|---|
+| Bumpless transfer | `u(t+) = u(t-)` на phase transition, back-calculate integral | `\|u(t+) - u(t-)\| < ε` |
+| Anti-windup | clamping или back-calculation; HEAT_UP — hotspot | SP далеко от possible → не overshoot после снижения SP |
+| Single-writer rule | только один task пишет state; event queue FIFO | fuzz duplicate events → deterministic final |
+| Supervisor watchdog | каждый task шлёт heartbeat; кикает HW WD только если все свежие; никогда не из ISR | kill task → HW WD fires |
+| Soft + Hard timeouts | per-phase soft alarm + HW reset | HEAT_UP > 45min → soft alarm |
+| Safe-state on boot | HW WD reset → safe state, не resume; после EMERGENCY — manual ACK | pull power mid-run → boot в SAFE |
+| Monotonic time | `time.monotonic()` Python; `esp_timer_get_time()` ESP32 | NTP jump → no transition |
+| Condition vs time transition | условие primary; time только как safety bound | HEADS→BODY по T+ABV stable, time как timeout |
+| Operator override hierarchy | Hand > Override > Manual > Auto; tieback для bumpless return | operator sets duty, resume auto → no jump |
+| Event log + telemetry | event log append-only durable; telemetry lossy ring | delete state, replay event → identical |
+
+#### 12.11.8 Operator override patterns (когда оператор должен вмешаться)
+
+Из англо форумов (homedistiller.org треды 5518, 54508, 78393, 76686):
+
+| Ситуация | Что замечает оператор | Что делает |
+|---|---|---|
+| Cooling water inlet T растёт mid-run | distillate plunges below column T | slows water flow до «hot to touch» (это не баг, не паника) |
+| Audible «helicopter» whistle | precursor захлёба | cuts power 20–30 %, **не закрывает отбор** |
+| Smell/taste — heads-tail edge | sensors не успевают за носом | manual cut |
+| Foaming в кубе | observable через окно куба | reduce charge до ~50 %, add Fermcap/oil |
+
+Sim должен экспонировать эти naturals — operator override interface c log того, что оператор делал. Тогда любой rule-based / RL agent сможет учиться на тех же триггерах что человек.
+
+#### 12.11.9 Recipe portability (dimensionless форма)
+
+Из StillDragon /discussion/2019, /discussion/1307, HD 69502, 67253:
+
+**Recipes должны быть dimensionless**, иначе не переносятся между колоннами:
+- **Reflux ratio R** (не duty cycle) — `R = L/D` где L=флегма, D=отбор
+- **F-factor fraction** = `Cv = v / v_flood` (всегда работаем 0.5–0.7)
+- **Energy/kg-charge** (kJ/kg, не kW absolute)
+
+Параметры **column-specific** (хранятся отдельно): D, H, packing HETP curve, wall-loss coefficient, condenser Cv.
+
+Параметры **universal** (VLE, water Cp, ethanol latent heat) — константы кода.
+
+Recipe = `{reflux_ratio_heads: 5.0, reflux_ratio_body: 2.0, Cv_target: 0.6, energy_per_kg: 1200}` вместо `{p_work: 60%, duty_body: 0.4, …}`.
+
+#### 12.11.10 Сводный чек-лист «sim v2» (что строить)
+
+Физика:
+- [ ] Multi-component VLE: minimum 5 веществ (MeOH, EtOH, H2O, 1-PrOH, isoamyl)
+- [ ] N-plate column cascade с MESH equations, hold-up per plate, HETP(Cv) curve
+- [ ] Δp(v, L) с пре-flood шкалой 30–50 %, oscillation FFT в 0.05–0.2 Hz band
+- [ ] Two-node boiler (film + bulk) с convective h ∝ 1/viscosity
+- [ ] Foam-over events: `P(foam) = f(V_fill, sugar_content, Q)`; signature impl
+- [ ] Dry-out: V_liquid → 0 → теплоёмкость падает скачком → T улетает
+- [ ] Cooling water inlet T как disturbance input
+- [ ] Subcooled reflux эффект (winter water)
+- [ ] Probe fouling state после puke event
+
+Hardware:
+- [ ] Valve state vector × 2 клапана (15 переменных каждый)
+- [ ] Coil thermal model + insulation aging
+- [ ] DS18B20 model с counterfeit families + sentinel values + EMI clustering
+- [ ] BME280 internal self-heat → bleeds into RH/P compensation
+- [ ] SSR thermal model отдельно (раздельные state vars)
+- [ ] Contactor chatter (от низкого V_coil)
+- [ ] Inductive kickback damage без snubber
+
+Controller:
+- [ ] `time.monotonic()` everywhere
+- [ ] Event log (append-only) + telemetry (ring buffer 1000 samples)
+- [ ] Bumpless transfer на каждом phase transition
+- [ ] Single-writer rule для state
+- [ ] Soft per-phase timeouts + Hard HW watchdog
+- [ ] Cold-start fail-safe; EMERGENCY → manual ACK; не auto-resume
+- [ ] Recipe dimensionless форма
+- [ ] Operator override hierarchy (Hand/Override/Manual/Auto)
+- [ ] -127 / 85.0000 filters
+- [ ] CRC error rate counter per sensor (excludes worst-performer)
+
+UI:
+- [ ] Diagnostics tab: Cv, Δp, HETP, hold-up; plate-by-plate composition profile
+- [ ] Valve health view (15 переменных)
+- [ ] Sensor health view (CRC rate, drift, jump rate)
+- [ ] Event log viewer
+- [ ] Manual override panel (force valve, force power)
+- [ ] Antifoam additive state
+- [ ] Cooling water inlet T slider (disturbance)
+
+Tests (30+ scenarios):
+- [ ] 1.5" vs 2" column comparison at 3kW и 5kW
+- [ ] Each valve failure mode in isolation
+- [ ] Counterfeit DS18B20 with each family
+- [ ] EMI burst at SSR switching
+- [ ] Foam event with sugar mash
+- [ ] Dry-out at end of session
+- [ ] Power loss + cold boot — fail-safe verification
+- [ ] Concurrent failures (3 problems at once)
+- [ ] Operator override during HEADS — bumpless return to auto
+- [ ] Cooling water hot day (24 °C inlet)
+- [ ] Long-running session (24 hours) — memory growth, drift accumulation
+- [ ] Replay test: event log → identical state
+
+### 12.12 Источники (обе волны ресёрча)
 
 Подобранные ветки и материалы (на момент мая 2026):
 
@@ -1008,6 +1259,67 @@ BrewPi — самая известная open-source платформа для �
 
 - [iStill (istill.com)](https://istill.com/distillery-equipment/) — recipe profiles, ABV control, ACM
 - [GENIO Stills (gstill.co.uk)](https://www.gstill.co.uk/why-choose-genio) — игольчатый клапан 0.0208 мм шаг
+
+**Вторая волна — гидродинамика, VLE, теория:**
+
+- McCabe, Smith, Harriott — *Unit Operations of Chemical Engineering* (главы 18, 22 — distillation, packed columns)
+- Mackowiak — *Fluid Dynamics of Packed Columns* (Springer, 2010) — HETP, hold-up, flooding для нерегулярных насадок
+- Billet & Schultes (1999) — HETP correlation для random packing
+- Stichlmair, Bravo, Fair (1989) — pressure drop and flooding for packed columns
+- Sinnott — *Chemical Engineering Design* vol. 6 (§11 distillation)
+- Leva (1954) — wet-bed pressure drop correlation
+- [homedistiller.org wiki — Cuts](https://homedistiller.org/wiki/index.php/Cuts) — heads/hearts/tails chemistry
+- [Home Distiller forum t=79915](https://homedistiller.org/forum/viewtopic.php?t=79915) — smearing tails
+- [Home Distiller forum t=93650](https://homedistiller.org/forum/viewtopic.php?t=93650) — boiler surging/puking
+- [Home Distiller forum t=82268](https://homedistiller.org/forum/viewtopic.php?t=82268) — thermowell lag
+- [StillDragon /discussion/2019](https://www.stilldragon.org/discussion/2019/width-of-column-vapour-speed-and-watts) — column dimensions vs vapor speed vs watts
+- [StillDragon /discussion/2664](https://www.stilldragon.org/discussion/2664/ideal-vapor-velocity-in-the-column) — vapor velocity targets
+- [StillDragon /discussion/1587](https://www.stilldragon.org/discussion/1587/flooding-packed-section) — flooding precursors
+
+**Вторая волна — DS18B20 и сенсоры:**
+
+- [cpetrich/counterfeit_DS18B20 (GitHub)](https://github.com/cpetrich/counterfeit_DS18B20) — каталог 6 семейств подделок с fingerprints
+- [Analog Devices AN148 — Guidelines for Reliable Long Line 1-Wire](https://www.analog.com/en/resources/technical-articles/guidelines-for-reliable-long-line-1wire-networks.html)
+- [Tasmota issue 9640 — Phantom 85°C readings](https://github.com/arendst/Tasmota/issues/9640)
+- [IK1ZYW Labs — DS18B20 self-heating measurements](https://ik1zyw.blogspot.com/2011/07/ds18b20-self-heat.html)
+- [Bosch BME280 long-term pressure drift](https://community.bosch-sensortec.com/mems-sensors-forum-jrmujtaw/post/bme280-pressure-measurement-performance-over-time-and-part-to-part-holaKBAevvoyKji)
+- [Habr — Подделки DS18B20 (на русском)](https://habr.com/ru/articles/470217/)
+- [Pi 4 BCM2837 clock-stretching bug — общеизвестная hardware errata](https://github.com/raspberrypi/linux/issues/3680) — не использовать GPIO 1-Wire на Pi4
+
+**Вторая волна — клапаны failure modes:**
+
+- [StillDragon blog — EPDM vs Silicone gaskets](https://stilldragon.com/blog/epdm-vs-silicone-gaskets/) — материалы уплотнений в hot ethanol
+- [Eltra-trade — Why solenoid valves buzz](https://eltra-trade.com/blog/why-solenoid-valves-buzz-electrical-and-mechanical-causes-explained-engineers-guide)
+- [Tameson — Solenoid valve response time](https://tameson.com/pages/solenoid-valve-response-time)
+- [Fokca — Coil overheating: hidden risk](https://www.fokcavalve.com/blog/coil-overheating:-the-hidden-risk-of-continuously-energized-solenoid-valves.html)
+- [Burkert — Eliminating water hammer](https://www.burkert-usa.com/en/company-career/what-s-new/press/media/hints-tips-from-buerkert/Eliminating-water-hammer)
+- [Emerson ASCO — Long-life valves catalog](https://www.emerson.com/documents/automation/catalog-long-life-valves-asco-en-584334.pdf)
+- [Insane Hydraulics — solenoid diode/snubber](https://www.insanehydraulics.com/letstalk/solenoiddiode.html)
+- [Lee Co — 5 common solenoid valve failure modes](https://www.theleeco.com/insights/5-common-solenoid-valve-failure-modes-2/)
+
+**Вторая волна — state machine / control theory:**
+
+- [Memfault Interrupt — Firmware Watchdog Best Practices](https://interrupt.memfault.com/blog/firmware-watchdog-best-practices)
+- [Ganssle — Designing Great Watchdog Timers](https://www.ganssle.com/watchdogs.htm)
+- [Erdos Miller — PID Anti-windup Techniques](https://info.erdosmiller.com/blog/pid-anti-windup-techniques)
+- [Astrom & Hagglund — relay autotune (PID)](https://eng.libretexts.org/Bookshelves/Industrial_and_Systems_Engineering/Chemical_Process_Dynamics_and_Controls_(Woolf)/09:_Proportional-Integral-Derivative_(PID)_Control)
+- [Visioli — Practical PID Control](https://link.springer.com/book/10.1007/1-84628-586-0)
+- [Martin Fowler — Event Sourcing](https://martinfowler.com/eaaDev/EventSourcing.html)
+- [PEP 418 — Monotonic time](https://peps.python.org/pep-0418/)
+- [EmbeddedRelated — Implementing State Machines](https://www.embeddedrelated.com/showarticle/543.php)
+- [Rockwell — Anti-reset Windup and Bumpless Transfer](https://www.rockwellautomation.com/en-us/docs/factorytalk-design-studio/current/contents-ditamap/instructions/instruction-set/special-instructions/anti-reset-windup-bumpless-transfer-manual-auto--p.html)
+
+**Дополнительные русские форумные ветки (вторая волна):**
+
+- [Перегонка пенящейся браги (29928)](https://forum.homedistiller.ru/index.php?topic=29928.0) — foam-over
+- [«Убегает брага» (44512)](http://forum.homedistiller.ru/index.php?topic=44512.60)
+- [Пена в браге (53432)](https://forum.homedistiller.ru/index.php?topic=53432.0)
+- [Простая аварийная автоматика (199658)](https://forum.homedistiller.ru/index.php?topic=199658.0)
+- [О температуре в кубе и двух датчиках (40354)](https://forum.homedistiller.ru/index.php?topic=40354.0)
+- [Защита колонны от отключения воды (19544)](https://forum.homedistiller.ru/index.php?topic=19544.0)
+- [Падение температуры в процессе ректификации (348438)](https://forum.homedistiller.ru/index.php?topic=348438.0)
+- [Аварийная защита на реле (289280)](https://forum.homedistiller.ru/index.php?topic=289280.0)
+- [Непонятные показания датчиков температуры (282003)](https://forum.homedistiller.ru/index.php?topic=282003.0)
 
 ## 13. Dry-тесты — план
 
