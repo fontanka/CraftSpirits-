@@ -256,6 +256,9 @@
           <div><label><input type="checkbox" id="ssr_genuine" checked /> SSR genuine (Crydom)</label></div>
         </div>
         <div class="row" style="margin-top: 6px;">
+          <div><label><input type="checkbox" id="atm_gas_sensors" /> BME680+pump на атм. трубке</label></div>
+        </div>
+        <div class="row" style="margin-top: 6px;">
           <div>
             <label>V_mains (V)</label>
             <input id="V_mains" type="number" value="230" min="170" max="260" step="5" class="small-input" />
@@ -379,6 +382,10 @@
         <div class="kv"><span class="k">Suspect sensor</span><span class="v" id="hw-suspect">—</span></div>
         <div class="kv"><span class="k">DS T_head CRC</span><span class="v" id="hw-ds-head-crc">—</span></div>
         <div class="kv"><span class="k">DS T_kub CRC</span><span class="v" id="hw-ds-kub-crc">—</span></div>
+        <div class="kv" style="border-top:1px solid var(--border); margin-top:4px; padding-top:4px"><span class="k">BME680 VOC</span><span class="v" id="hw-bme-voc">—</span></div>
+        <div class="kv"><span class="k">BME680 P_atm</span><span class="v" id="hw-bme-p">—</span></div>
+        <div class="kv"><span class="k">BME680 T</span><span class="v" id="hw-bme-t">—</span></div>
+        <div class="kv"><span class="k">VOC (atm ppm)</span><span class="v" id="hw-voc-ppm">—</span></div>
       </div>
     </div>
 
@@ -563,6 +570,12 @@ function updateUI(s) {
     ? '<span class="badge err">' + h.suspect_sensor + '</span>' : '—';
   document.getElementById('hw-ds-head-crc').textContent = h.ds_T_head_crc != null ? h.ds_T_head_crc : '—';
   document.getElementById('hw-ds-kub-crc').textContent = h.ds_T_kub_crc != null ? h.ds_T_kub_crc : '—';
+  document.getElementById('hw-bme-voc').innerHTML = h.bme680_voc_index != null
+    ? (h.bme680_voc_index > 200 ? '<span class="badge warn">' + num(h.bme680_voc_index, 0) + '</span>' : num(h.bme680_voc_index, 0))
+    : '—';
+  document.getElementById('hw-bme-p').textContent = h.bme680_P_hPa != null ? num(h.bme680_P_hPa, 0) + ' hPa' : '—';
+  document.getElementById('hw-bme-t').textContent = h.bme680_T_C != null ? num(h.bme680_T_C, 1) + ' °C' : '—';
+  document.getElementById('hw-voc-ppm').textContent = p.atm_tube_voc_ppm != null ? num(p.atm_tube_voc_ppm, 0) + ' ppm' : '—';
 
   // Alerts
   document.getElementById('n-alerts').textContent = c.n_alerts || 0;
@@ -670,6 +683,7 @@ document.getElementById('btn-start').onclick = async () => {
       ssr_genuine: document.getElementById('ssr_genuine').checked,
       V_mains: +document.getElementById('V_mains').value,
       valve_takeoff_class: document.getElementById('valve_class').value,
+      atm_gas_sensors: document.getElementById('atm_gas_sensors').checked,
     };
   }
   await api('/api/start', body);

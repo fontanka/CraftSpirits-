@@ -561,6 +561,230 @@ class PZEM:
 
 
 # ============================================================================
+# MQ-3 alcohol gas sensor (resistive SnO2, $3-5, analog ADC)
+# ============================================================================
+
+@dataclass
+class MQ3State:
+    """MQ-3 detection ratio R_sensor / R_0 (baseline в чистом воздухе).
+    Lower ratio = больше алкогольного пара."""
+    R_ratio: float = 1.0       # 1.0 = clean air, 0.05 = saturated alcohol
+    R_0_clean_air: float = 10000.0   # калибруется ручками в чистом воздухе
+    adc_value: int = 0          # ADC 0-1023 reading
+    preheat_remaining_s: float = 300.0  # 5 минут warm-up after power-on
+    T_at_sensor_C: float = 25.0
+    damaged: bool = False        # T > 50°C ползёт несколько минут — degrade
+    drift_factor: float = 1.0    # baseline drift ~10%/мес
+
+
+class MQ3:
+    """MQ-3 alcohol gas sensor: SnO2 resistive, analog output via ADC.
+    Sensitive: ethanol 50-10000 ppm, also responds to methanol/IPA/H2.
+
+    Operating T: −10…+50°C (BME680 предохраняет, но MQ-3 более стойкий
+    к short bursts ~70°C, восстанавливается).
+
+    Response time: ~30 сек на rise, ~60 сек на decay.
+    Drift: ~10%/мес. Preheat: 5 min для стабильного baseline.
+
+    Подключение: 5V VCC, AO → MCU ADC, DO unused для нашего случая.
+    """
+
+    DETECTION_THRESHOLD_PPM = 10.0
+    SATURATION_PPM = 10000.0
+    TEMP_LIMIT_DAMAGE_C = 70.0
+    TEMP_LIMIT_DEGRADE_C = 50.0
+
+    def __init__(self, R_0_calibration: float = 10000.0):
+        self.s = MQ3State(R_0_clean_air=R_0_calibration)
+
+    def step(self, dt: float, t_sim: float, ethanol_ppm_eq: float,
+             T_at_sensor_C: float = 25.0):
+        s = self.s
+        s.T_at_sensor_C = T_at_sensor_C
+
+        # Preheat countdown
+        if s.preheat_remaining_s > 0:
+            s.preheat_remaining_s = max(0, s.preheat_remaining_s - dt)
+
+        # Permanent damage if too hot
+        if T_at_sensor_C > self.TEMP_LIMIT_DAMAGE_C:
+            s.damaged = True
+        if s.damaged:
+            s.R_ratio = float("nan")
+            s.adc_value = 0
+            return
+
+        # Drift (slow accumulation)
+        s.drift_factor += random.gauss(0, 1e-7) * dt
+
+        # T compensation на target: при росте T → sensor R smaller (datasheet)
+        T_comp = 1.0 - (T_at_sensor_C - 25) * 0.005
+
+        # R_ratio из datasheet: R_s/R_0 = 0.4 * (ppm/200)^-0.6 для ethanol
+        # (отнормирован под realistic диапазон: ppm=200 → ratio 0.4)
+        if ethanol_ppm_eq < 1:
+            target_ratio = 1.0  # clean air baseline
+        else:
+            ppm_clamped = min(ethanol_ppm_eq, self.SATURATION_PPM)
+            target_ratio = 0.4 * (ppm_clamped / 200) ** (-0.6)
+            target_ratio = max(0.05, min(1.0, target_ratio))
+
+        # Apply T comp and drift на target (не на smoothed value!)
+        target_ratio *= T_comp * s.drift_factor
+        target_ratio = max(0.05, min(1.0, target_ratio))
+
+        # Response time: ~30 sec rise (target < current = rising signal),
+        # ~60 sec decay (target > current = clearing)
+        tau = 30.0 if target_ratio < s.R_ratio else 60.0
+        alpha = dt / (tau + dt)
+        s.R_ratio += (target_ratio - s.R_ratio) * alpha
+
+        # ADC simulation: assume voltage divider w/ load resistor R_L = 10kΩ
+        # V_out = 5 * R_L / (R_s + R_L), R_s = R_ratio * R_0
+        V_out = 5 * 10000 / (s.R_ratio * s.R_0_clean_air + 10000)
+        s.adc_value = int(min(1023, max(0, V_out / 5 * 1023)))
+
+
+# ============================================================================
+# BME680 environmental + VOC sensor ($12-15, I2C)
+# ============================================================================
+
+@dataclass
+class BME680State:
+    """BME680 internal state. Measurements: T, RH, P, R_gas (gas resistance).
+    BSEC adds VOC index 0-500 (relative) после 4-day calibration."""
+    T_C: float = 25.0
+    RH_pct: float = 45.0
+    P_hPa: float = 1013.0
+    R_gas_ohm: float = 50000.0   # baseline ~50 kΩ в чистом воздухе
+    R_gas_baseline_ohm: float = 50000.0  # сохранённый baseline (BSEC learn)
+    voc_index: float = 50.0       # BSEC output, default 50 = норма
+    # Failure modes
+    damaged: bool = False         # T > 85°C
+    degraded: bool = False        # T 60-85°C → temporary noise increase
+    obstructed: bool = False      # filter засорён каплями
+    bsec_cal_remaining_s: float = 4 * 86400  # 4 дня для BSEC calibration
+    crc_error: bool = False
+
+
+class BME680:
+    """BME680 sensor с active sampling pump на атмосферной трубке.
+
+    Реальный mount (stage 15):
+    - Установка ПОСЛЕ штатного DS1821 93°C аварийника (thermal protection)
+    - Маленькая air pump 5V ($2-3) тянет 50-100 mL/min через камеру с BME680
+    - Активный flow = response 10-15 сек (vs 60-120 сек диффузия)
+    - При прорыве: DS1821 trip → ТЭН off → пар останавливается через 5-10 сек
+    - Forced convection cooling корпуса BME680 (×10 vs natural)
+
+    Operating T: −40…+85°C. Above 85 → permanent damage.
+    Response: ~20 сек natural diffusion, ~10 сек с pump.
+
+    Для distillation use: сырое R_gas + ручная калибровка одним пробным
+    прогоном для baseline. BSEC не нужен (per-session re-calibrate).
+    """
+
+    TEMP_LIMIT_DAMAGE_C = 85.0
+    TEMP_LIMIT_DEGRADE_C = 60.0
+    BSEC_INIT_VOC_INDEX = 50.0
+
+    def __init__(self, use_bsec: bool = False, pump_lpm: float = 0.075):
+        """pump_lpm: расход помпы L/min (default 75 mL/min = 4.5 L/h).
+        pump_lpm=0 → пассивный режим (только diffusion, response 60 сек)."""
+        self.s = BME680State()
+        self.use_bsec = use_bsec
+        self.pump_lpm = pump_lpm
+        self._t_since_obstruction = 0.0
+
+    def step(self, dt: float, t_sim: float,
+             T_at_sensor_C: float, RH_ambient_pct: float,
+             P_atm_hPa: float, ethanol_ppm_eq: float):
+        s = self.s
+        s.T_C = T_at_sensor_C
+        s.RH_pct = RH_ambient_pct
+        s.P_hPa = P_atm_hPa
+
+        # Permanent damage above 85°C
+        if T_at_sensor_C > self.TEMP_LIMIT_DAMAGE_C:
+            s.damaged = True
+        if s.damaged:
+            s.R_gas_ohm = float("nan")
+            s.voc_index = float("nan")
+            return
+
+        # Degraded mode 60-85°C: more noise
+        s.degraded = T_at_sensor_C > self.TEMP_LIMIT_DEGRADE_C
+
+        # BSEC calibration countdown
+        if self.use_bsec and s.bsec_cal_remaining_s > 0:
+            s.bsec_cal_remaining_s = max(0, s.bsec_cal_remaining_s - dt)
+
+        # Obstruction (capли конденсата засоряют filter)
+        if s.obstructed:
+            s.R_gas_ohm = s.R_gas_baseline_ohm  # фрозен
+            s.voc_index = self.BSEC_INIT_VOC_INDEX  # хочется константа
+            return
+
+        # R_gas model: МОS сенсор → R падает с ростом восстанавливающих газов
+        # Empirical для ethanol: R = R_0 / (1 + ppm / K), K ~ 50 для типичных
+        if ethanol_ppm_eq < 1:
+            target_R = s.R_gas_baseline_ohm
+        else:
+            target_R = s.R_gas_baseline_ohm / (1 + ethanol_ppm_eq / 50)
+            target_R = max(1000, target_R)  # минимум 1 kΩ
+
+        # Temperature/humidity correction (datasheet)
+        T_comp = 1 - (T_at_sensor_C - 25) * 0.01
+        RH_comp = 1 - (RH_ambient_pct - 50) * 0.002
+        target_R *= T_comp * RH_comp
+
+        # Response time: 10 сек с pump, 60 сек без
+        tau = 10.0 if self.pump_lpm > 0.01 else 60.0
+        alpha = dt / (tau + dt)
+        s.R_gas_ohm += (target_R - s.R_gas_ohm) * alpha
+
+        # Noise (worse при degraded)
+        sigma = 0.02 if not s.degraded else 0.06
+        s.R_gas_ohm *= (1 + random.gauss(0, sigma))
+
+        # BSEC VOC index calc (упрощённо)
+        if self.use_bsec and s.bsec_cal_remaining_s > 0:
+            # Still learning baseline
+            s.voc_index = self.BSEC_INIT_VOC_INDEX
+        else:
+            # log(R_baseline / R_current) mapped to 0-500
+            if s.R_gas_baseline_ohm > 0 and s.R_gas_ohm > 0:
+                ratio = s.R_gas_baseline_ohm / max(s.R_gas_ohm, 100)
+                # log scaling: ratio=1 → 50, ratio=2 → 100, ratio=10 → 250
+                import math
+                s.voc_index = min(500, 50 * (1 + math.log(max(ratio, 0.1)) / math.log(2)))
+
+        # CRC errors stochastic
+        s.crc_error = random.random() < 0.0001
+
+    def learn_baseline(self):
+        """Манипуляция для калибровки: сохранить текущий R_gas как новый
+        baseline (использовать в установившемся состоянии body)."""
+        self.s.R_gas_baseline_ohm = self.s.R_gas_ohm
+
+    def read(self) -> dict | None:
+        """Возвращает словарь с измерениями. None если CRC error."""
+        s = self.s
+        if s.crc_error:
+            return None
+        if s.damaged:
+            return None
+        return {
+            "T_C": s.T_C,
+            "RH_pct": s.RH_pct,
+            "P_hPa": s.P_hPa,
+            "R_gas_ohm": s.R_gas_ohm,
+            "voc_index": s.voc_index,
+        }
+
+
+# ============================================================================
 # CONTACTOR (coil chatter при low V)
 # ============================================================================
 

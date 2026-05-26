@@ -187,6 +187,7 @@ class SimEngine:
                 "T_kub_wall": o.T_kub_wall_C,
                 "T_head": o.T_head_C,
                 "T_atm_tube": o.T_atm_tube_C,
+                "atm_tube_voc_ppm": o.atm_tube_voc_ppm,
                 "T_water_in": o.T_water_in_C,
                 "T_water_out": o.T_water_out_C,
                 "T_water_after_product": s.condenser.s.T_water_after_product_C,
@@ -248,6 +249,12 @@ class SimEngine:
                 "ds_T_head_sent": r.get("ds_T_head_sentinels"),
                 "ds_T_kub_crc": r.get("ds_T_kub_crc_fails"),
                 "ds_T_kub_sent": r.get("ds_T_kub_sentinels"),
+                # Stage 15: BME680 + pump на атмосферной трубке
+                "bme680_voc_index": r.get("bme680_voc_index"),
+                "bme680_R_gas": r.get("bme680_R_gas"),
+                "bme680_T_C": r.get("bme680_T_C"),
+                "bme680_P_hPa": r.get("bme680_P_hPa"),
+                "bme680_damaged": r.get("bme680_damaged"),
             },
             "faults": {
                 "pressure_drift": s.faults.pressure_drift,

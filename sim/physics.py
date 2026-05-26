@@ -383,6 +383,7 @@ class Boiler:
             s.probe_fouled_bias_C = random.uniform(0.5, 2.0)
             s.probe_fouled_until_t = 600  # decays over 10 min real time
 
+        s._last_m_dot_vapor = m_dot_vapor_kg_s  # для observables atm_tube_voc
         return m_dot_vapor_kg_s, y_mass, T_boil if is_boiling else s.T_bulk_C
 
 
@@ -637,30 +638,53 @@ class Column:
 
 @dataclass
 class CondenserState:
+    """Stage 15 update: реальная топология имеет ДВА независимых water
+    circuits.
+
+    Реальный setup пользователя (ХД/4-375 + дистиллятор ХД/4-2500ПК):
+    - Main reflux condenser (дефлегматор unit ХД/4-2500ПК): регулируемый
+      water flow. Изменение flow rate = изменение reflux ratio. Это то
+      что пользователь крутит вручную для достижения 93% ABV.
+    - Product condenser (малый, на выходе клапана узла отбора):
+      собственный постоянный water flow, охлаждает product до 20-30°C.
+    """
     T_water_in_C: float = 12.0
-    T_water_out_C: float = 12.0  # после прохождения main reflux condenser
-    T_water_after_product_C: float = 12.0  # после product condenser (если в series)
-    water_flow_lpm: float = 3.0  # operator-set
-    water_valve_open: bool = False
-    # Cooling power balance
-    Q_to_water_W: float = 0           # main reflux condenser
-    Q_to_water_product_W: float = 0   # product condenser (если в series)
-    # Stage 10: main bypass (water пропускает основной reflux condenser)
+    # Main reflux condenser (variable flow, основной reflux mechanism)
+    T_water_out_main_C: float = 12.0
+    water_flow_main_lpm: float = 3.0  # regulated by operator/auto
+    water_valve_main_open: bool = False
+    Q_to_water_main_W: float = 0
+    main_capacity_kW: float = 2.0  # ХД/4-2500ПК
+    # Product condenser (constant separate flow)
+    T_water_out_product_C: float = 12.0
+    water_flow_product_lpm: float = 0.8  # constant separate flow
+    Q_to_water_product_W: float = 0
+    product_capacity_kW: float = 0.3
+    # Aliases для обратной совместимости с существующими scenarios
+    T_water_out_C: float = 12.0  # = T_water_out_main_C
+    water_flow_lpm: float = 3.0  # = water_flow_main_lpm
+    water_valve_open: bool = False  # = water_valve_main_open
+    Q_to_water_W: float = 0  # = Q_to_water_main_W
+    T_water_after_product_C: float = 12.0  # для UI backward-compat
+    # Stage 10: main bypass (вода больше не идёт в main reflux condenser,
+    # vapor пробивается без конденсации)
     main_bypass_closed: bool = False
-    # Stage 10: capacity ratings
-    main_capacity_kW: float = 2.0     # ХД setup: 2 kW reflux condenser
-    product_capacity_kW: float = 0.3  # малый product condenser, кулирует takeoff
 
 
 class Condenser:
-    """Reflux condenser: полная конденсация всего пара пришедшего сверху.
-    Cooling water energy balance.
+    """Reflux condenser model. Stage 15 update — ДВА независимых cooling
+    circuits (НЕ в series, как было ошибочно ранее):
 
-    Stage 10 — поддерживает 2-condenser series: cooling water flow
-    [inlet] → product condenser → main reflux condenser → [drain]
-    Если main_bypass_closed=True (запорно-регулировочный вентиль перекрыт),
-    вода идёт только через product, а main не охлаждается → vapor не
-    конденсируется (potstill-like aufrise).
+    1. Main reflux condenser (ХД/4-2500ПК deflegmator):
+       - Regulated water flow (variable, set by operator или automation).
+       - Это главный regulating control для reflux ratio. Больше воды →
+         больше reflux → выше ABV. Меньше воды → vapor breakthrough.
+       - main_bypass_closed=True полностью отключает.
+
+    2. Product condenser (малый, на выходе клапана узла отбора):
+       - Constant separate water flow (~0.5-1 L/min).
+       - Cooling capacity ~0.3 kW (достаточно для takeoff 1-2 L/h).
+       - НЕ регулируется в normal operation.
     """
 
     CP_WATER = 4186.0
@@ -671,25 +695,41 @@ class Condenser:
     def step(self, dt: float, m_dot_vapor_kg_s: float, x_vapor_mass: List[float],
              water_cutoff: bool = False,
              m_dot_product_kg_s: float = 0.0):
-        """Один шаг.
+        """Stage 15: 2 НЕЗАВИСИМЫХ cooling water circuits.
         m_dot_vapor_kg_s — пар из колонны → main reflux condenser
-        m_dot_product_kg_s — отбор из takeoff → product condenser
-                              (для sub-cooling уже сконденсированного дистиллята)
+        m_dot_product_kg_s — отбор → product condenser (cool to 25°C)
         """
         s = self.s
-        # 1. Q absorbed by main reflux condenser (только когда water flows through)
+        # Sync aliases: код может писать в s.water_flow_lpm — пробросим в main
+        s.water_flow_main_lpm = s.water_flow_lpm
+        s.water_valve_main_open = s.water_valve_open
+
+        # === Main reflux condenser ===
         if m_dot_vapor_kg_s > 0 and not s.main_bypass_closed:
             L_vap = latent_heat_mix(x_vapor_mass)
-            s.Q_to_water_W = m_dot_vapor_kg_s * L_vap
-            # Cap by physical capacity rating
-            s.Q_to_water_W = min(s.Q_to_water_W, s.main_capacity_kW * 1000)
+            s.Q_to_water_main_W = m_dot_vapor_kg_s * L_vap
+            s.Q_to_water_main_W = min(s.Q_to_water_main_W, s.main_capacity_kW * 1000)
         else:
-            s.Q_to_water_W = 0
+            s.Q_to_water_main_W = 0
 
-        # 2. Q absorbed by product condenser — sub-cool takeoff stream от ~78°C к 25°C
+        if s.water_valve_main_open and not water_cutoff and not s.main_bypass_closed:
+            m_dot_w_main = s.water_flow_main_lpm / 60.0
+            if m_dot_w_main > 1e-4:
+                dT_main = s.Q_to_water_main_W / (m_dot_w_main * self.CP_WATER)
+                target = s.T_water_in_C + dT_main
+                s.T_water_out_main_C += (target - s.T_water_out_main_C) * dt / 3.0
+            else:
+                m_in_pipe = 0.3
+                s.T_water_out_main_C += s.Q_to_water_main_W * dt / (m_in_pipe * self.CP_WATER)
+        else:
+            # Bypass or cutoff — нет teploobmena
+            m_in_pipe = 0.3
+            s.T_water_out_main_C += s.Q_to_water_main_W * dt / (m_in_pipe * self.CP_WATER)
+
+        # === Product condenser (independent constant flow) ===
         if m_dot_product_kg_s > 0:
             cp_prod = cp_mix(x_vapor_mass)
-            dT_subcool = 78 - 25  # typical для product condenser
+            dT_subcool = 78 - 25  # cool product from ~78°C to ~25°C
             s.Q_to_water_product_W = m_dot_product_kg_s * cp_prod * dT_subcool
             s.Q_to_water_product_W = min(
                 s.Q_to_water_product_W, s.product_capacity_kW * 1000
@@ -697,45 +737,27 @@ class Condenser:
         else:
             s.Q_to_water_product_W = 0
 
-        # 3. Water loop energy balance
-        if s.water_valve_open and not water_cutoff:
-            m_dot_w = s.water_flow_lpm / 60 * 1.0  # kg/s (ρ_water ≈ 1)
-            if m_dot_w > 1e-4:
-                # Series flow: вода сначала через product condenser, потом main
-                dT_product = s.Q_to_water_product_W / (m_dot_w * self.CP_WATER)
-                target_after_product = s.T_water_in_C + dT_product
-                tau = 3.0
-                s.T_water_after_product_C += (
-                    target_after_product - s.T_water_after_product_C
-                ) * dt / tau
+        if not water_cutoff:
+            m_dot_w_prod = s.water_flow_product_lpm / 60.0  # constant
+            if m_dot_w_prod > 1e-4:
+                dT_prod = s.Q_to_water_product_W / (m_dot_w_prod * self.CP_WATER)
+                target_prod = s.T_water_in_C + dT_prod
+                s.T_water_out_product_C += (target_prod - s.T_water_out_product_C) * dt / 3.0
 
-                # Main condenser: входная вода = выход product
-                if s.main_bypass_closed:
-                    # Bypass: вода не идёт в main → main heating без отвода
-                    s.T_water_out_C = s.T_water_after_product_C
-                else:
-                    dT_main = s.Q_to_water_W / (m_dot_w * self.CP_WATER)
-                    target_main_out = s.T_water_after_product_C + dT_main
-                    s.T_water_out_C += (target_main_out - s.T_water_out_C) * dt / tau
-            else:
-                # No flow — water in pipe heats rapidly
-                m_in_pipe = 0.3
-                total_Q = s.Q_to_water_W + s.Q_to_water_product_W
-                s.T_water_out_C += total_Q * dt / (m_in_pipe * self.CP_WATER)
-                s.T_water_after_product_C += s.Q_to_water_product_W * dt / (m_in_pipe * self.CP_WATER)
-        else:
-            # No flow at all
-            m_in_pipe = 0.3
-            total_Q = s.Q_to_water_W + s.Q_to_water_product_W
-            s.T_water_out_C += total_Q * dt / (m_in_pipe * self.CP_WATER)
-            s.T_water_after_product_C += s.Q_to_water_product_W * dt / (m_in_pipe * self.CP_WATER)
+        # Decay back к inlet T когда нет нагрузки
+        if s.Q_to_water_main_W < 10:
+            s.T_water_out_main_C += (s.T_water_in_C - s.T_water_out_main_C) * dt / 30
+        if s.Q_to_water_product_W < 10:
+            s.T_water_out_product_C += (s.T_water_in_C - s.T_water_out_product_C) * dt / 30
 
-        # 4. Equilibrium decay when no heat
-        if s.Q_to_water_W < 10 and s.Q_to_water_product_W < 10:
-            s.T_water_out_C += (s.T_water_in_C - s.T_water_out_C) * dt / 30
-            s.T_water_after_product_C += (s.T_water_in_C - s.T_water_after_product_C) * dt / 30
-        s.T_water_out_C = min(s.T_water_out_C, 130)
-        s.T_water_after_product_C = min(s.T_water_after_product_C, 130)
+        # Cap
+        s.T_water_out_main_C = min(s.T_water_out_main_C, 130)
+        s.T_water_out_product_C = min(s.T_water_out_product_C, 130)
+
+        # Aliases (для legacy read paths)
+        s.T_water_out_C = s.T_water_out_main_C
+        s.Q_to_water_W = s.Q_to_water_main_W
+        s.T_water_after_product_C = s.T_water_out_product_C
 
 
 # ============================================================================
@@ -788,6 +810,55 @@ def _compute_T_atm_tube(T_water_out_C: float, T_head_C: float,
     return base
 
 
+def _compute_atm_tube_voc(y_top_mass: List[float], m_dot_vapor_kg_s: float,
+                          Cv: float, T_water_out_C: float,
+                          main_bypass_closed: bool, column_flooded: bool,
+                          is_boiling: bool) -> float:
+    """Концентрация VOC (ethanol equivalent ppm) на атмосферной трубке
+    дефлегматора. Модель:
+    - В HEAT_UP (no boiling): ~0 ppm — нет пара
+    - В STABILIZE (нет отбора, low Cv): немного — fugitive escape ~30 ppm
+    - В HEADS (yhead высокий по MeOH/acetaldehyde): ~200-500 ppm
+    - В BODY (steady-state etOH): ~50-100 ppm
+    - В TAILS (тяжёлые congeners): растёт 100-300 ppm
+    - При flooding/bypass: vapor breaks through, 1000-3000 ppm
+    - Стохастика ±20% — реальный sensor видит шум
+
+    y_top_mass: composition пара наверху колонны (5 components)
+    """
+    if not is_boiling or m_dot_vapor_kg_s < 1e-7:
+        return random.uniform(5, 15)  # ambient baseline VOC
+
+    # Base: fraction уносится без конденсации = функция от efficiency дефлегматора
+    # При Cv ~ 0.5-0.7 efficiency ~99%, escapes ~1% → low ppm
+    # При Cv > 0.85 efficiency падает
+    base_escape = 0.01  # 1% уноса в норме
+    if Cv > 0.85:
+        base_escape += (Cv - 0.85) * 0.5  # до 8% @ Cv=1.0
+    if column_flooded:
+        base_escape = 0.2  # 20% при flooding
+    if main_bypass_closed:
+        base_escape = 0.5  # 50%+ при отключённом main condenser
+
+    # m_dot_vapor in kg/s. Ethanol mass fraction in vapor at top:
+    eth_frac = y_top_mass[1] if len(y_top_mass) > 1 else 0.0
+    meoh_frac = y_top_mass[0] if len(y_top_mass) > 0 else 0.0
+    propanol_frac = y_top_mass[3] if len(y_top_mass) > 3 else 0.0
+    isoamyl_frac = y_top_mass[4] if len(y_top_mass) > 4 else 0.0
+
+    # MeOH более летуч → быстрее уходит через дефлегматор (×1.5)
+    # Propanol/isoamyl heavier → ×0.7 (хуже escapes но более persistent)
+    voc_mass_escape = (eth_frac + 1.5 * meoh_frac + 0.7 * (propanol_frac + isoamyl_frac))
+    # Конвертим в условные ppm на атм. трубке. Calibration: при body steady
+    # state (eth_frac ~0.4 в pare, Cv ~0.5) → ~70 ppm
+    ppm = base_escape * voc_mass_escape * 7000
+    # Холодная вода = больше конденсации, меньше escape
+    ppm *= max(0.5, 1.5 - T_water_out_C / 50)
+    # Стохастика
+    ppm *= random.uniform(0.8, 1.2)
+    return max(0, ppm)
+
+
 @dataclass
 class StillObservables:
     """Что выдаёт физика наружу — что «датчики могли бы прочитать».
@@ -809,6 +880,7 @@ class StillObservables:
     T_kub_wall_C: float  # стенка куба — другая T, для dry-out detection
     T_head_C: float
     T_atm_tube_C: float  # DS1821 на атмосферной трубке дефлегматора (93°C trip)
+    atm_tube_voc_ppm: float  # ethanol-eq VOC concentration на атм. трубке
     T_water_in_C: float
     T_water_out_C: float
     P_atm_hPa: float
@@ -923,6 +995,11 @@ class Still:
         self.valve_takeoff_hw = None
         self.valve_water_hw = None
         self.contactor_hw = None
+        # Stage 15: BME680 + pump на атмосферной трубке (за DS1821 93°C trip
+        # для thermal protection). Используется для VOC/baseline + atm
+        # pressure + ambient T (закрывает 2 из 3 «дыр» сенсоров: давление и
+        # phase confirmation).
+        self.bme680_atm = None
         self._last_ssr_switching = False  # передаётся в DS18B20.read как EMI flag
         self.V_mains = 230.0  # для contactor + valve coil V_supply
 
@@ -936,13 +1013,16 @@ class Still:
                                    valve_takeoff_snubber: bool = True,
                                    valve_water_snubber: bool = True,
                                    valve_takeoff_class=None,
-                                   V_mains: float = 230.0):
+                                   V_mains: float = 230.0,
+                                   atm_gas_sensors: bool = False):
         """Включает hardware-level моделирование сенсоров и SSR.
         Каждый ds_family_* — CounterfeitFamily enum (None = ORIGINAL).
+        atm_gas_sensors=True добавляет MQ-3 + BME680 на атмосферной трубке
+        дефлегматора (stage 15).
         Без вызова этого метода поведение Still неизменно — tests/scenarios
         работающие с idealnym readout не ломаются."""
         from hardware import (CoilClass, CounterfeitFamily, Contactor,
-                              DS18B20, SSR, Valve)
+                              DS18B20, SSR, Valve, BME680)
         ORIG = CounterfeitFamily.ORIGINAL
         self.ds18b20_T_kub = DS18B20("28-aa-01", ds_family_T_kub or ORIG)
         self.ds18b20_T_kub_wall = DS18B20("28-aa-02", ds_family_T_kub_wall or ORIG)
@@ -960,6 +1040,15 @@ class Still:
         )
         self.contactor_hw = Contactor()
         self.V_mains = V_mains
+        # Stage 15: BME680 + pump на атмосферной трубке (за DS1821 для thermal
+        # protection). Активный sampling 75 mL/min, response time ~10 сек.
+        if atm_gas_sensors:
+            self.bme680_atm = BME680(use_bsec=False, pump_lpm=0.075)
+            # Baseline калибровка делается одним пробным прогоном в body
+            # steady-state. Здесь предзадаём типичное clean-air ~50 kΩ.
+            self.bme680_atm.s.R_gas_baseline_ohm = 50000
+        else:
+            self.bme680_atm = None
         self.realistic_hw_enabled = True
         return self
 
@@ -1142,6 +1231,34 @@ class Still:
         if self.active_receiver == "body" and self.boiler.s.T_bulk_C > 95:
             self.active_receiver = "tails"
 
+        # 7. BME680 на атмосферной трубке (за штатным DS1821 thermal trip).
+        # Температура в позиции BME680 ≈ T_atm_tube минус 5°C (cooling за
+        # счёт расстояния от DS1821 + forced convection помпой).
+        if self.bme680_atm is not None:
+            o_voc_ppm = _compute_atm_tube_voc(
+                y_top_mass=self.column.s.y_top_mass,
+                m_dot_vapor_kg_s=getattr(self.boiler.s, '_last_m_dot_vapor', 0.0),
+                Cv=self.column.s.Cv,
+                T_water_out_C=self.condenser.s.T_water_out_C,
+                main_bypass_closed=self.condenser.s.main_bypass_closed,
+                column_flooded=self.column.s.flooded,
+                is_boiling=self.boiler.s.is_boiling,
+            )
+            T_at_sensor = _compute_T_atm_tube(
+                T_water_out_C=self.condenser.s.T_water_out_C,
+                T_head_C=self.column.T_top_C(),
+                main_bypass_closed=self.condenser.s.main_bypass_closed,
+                column_flooded=self.column.s.flooded,
+                Cv=self.column.s.Cv,
+            ) - 5  # на 5°C ниже trubki (помпа + distance)
+            self.bme680_atm.step(
+                dt, self.t_sim_s,
+                T_at_sensor_C=T_at_sensor,
+                RH_ambient_pct=45,
+                P_atm_hPa=self.P_atm_Pa_base / 100,
+                ethanol_ppm_eq=o_voc_ppm,
+            )
+
         self.t_sim_s += dt
 
     def _add_to_active_receiver(self, V_L: float, composition_mass: List[float]):
@@ -1228,6 +1345,15 @@ class Still:
                 column_flooded=col.flooded,
                 Cv=col.Cv,
             ),
+            atm_tube_voc_ppm=_compute_atm_tube_voc(
+                y_top_mass=col.y_top_mass,
+                m_dot_vapor_kg_s=getattr(b, '_last_m_dot_vapor', 0.0),
+                Cv=col.Cv,
+                T_water_out_C=c.T_water_out_C,
+                main_bypass_closed=c.main_bypass_closed,
+                column_flooded=col.flooded,
+                is_boiling=b.is_boiling,
+            ),
             T_water_in_C=c.T_water_in_C,
             T_water_out_C=c.T_water_out_C,
             P_atm_hPa=self.P_atm_Pa_base / 100,
@@ -1295,6 +1421,7 @@ class Still:
             "T_kub_wall": t_kub_wall,
             "T_head": t_head,
             "T_atm_tube": o.T_atm_tube_C,
+            "atm_tube_voc_ppm": o.atm_tube_voc_ppm,
             "T_water_in": t_water_in,
             "T_water_out": t_water_out,
             "P_atm_hPa": o.P_atm_hPa,
@@ -1342,4 +1469,10 @@ class Still:
             "ds_T_water_out_sentinels": self.ds18b20_T_water_out.s.sentinel_count if self.realistic_hw_enabled else None,
             "ds_T_kub_wall_crc_fails": self.ds18b20_T_kub_wall.s.crc_fail_count if self.realistic_hw_enabled else None,
             "ds_T_kub_wall_sentinels": self.ds18b20_T_kub_wall.s.sentinel_count if self.realistic_hw_enabled else None,
+            # Stage 15: BME680 на атмосферной трубке (за DS1821 + помпа)
+            "bme680_R_gas": self.bme680_atm.s.R_gas_ohm if self.bme680_atm else None,
+            "bme680_voc_index": self.bme680_atm.s.voc_index if self.bme680_atm else None,
+            "bme680_T_C": self.bme680_atm.s.T_C if self.bme680_atm else None,
+            "bme680_P_hPa": self.bme680_atm.s.P_hPa if self.bme680_atm else None,
+            "bme680_damaged": self.bme680_atm.s.damaged if self.bme680_atm else None,
         }
