@@ -130,11 +130,23 @@ class Recipe:
     # (DS1821, programmable trip ~93°C). При прорыве пара/воды/перегреве сверху.
     t_atm_tube_emergency_C: float = 93.0
 
-    # Stage 11: takeoff control mode (см. forum discussion auto vs manual ABV).
-    # 'pwm'    — классический start-stop с duty_body, фиксированный период
-    # 'smooth' — плавная пропорциональная регулировка через partial-open valve
-    #            (требует PWM-fast или regulator), feedback по T_head
+    # Stage 11/16: takeoff control mode.
+    # 'pwm'        — start-stop клапан спирта, фикс duty (классический БКУ)
+    # 'smooth'     — adaptive PWM с P-controller feedback на T_head
+    # 'continuous' — клапан спирта всегда OPEN, регулировка через water
+    #                flow (servo+needle на main condenser). Воспроизводит
+    #                manual mode пользователя.
     takeoff_mode: str = "pwm"
+    # Stage 16: water flow control mode (для continuous mode и hybrid)
+    # 'constant'   — фиксированный flow rate в main condenser
+    # 'smooth_pid' — P-controller на T_head управляет servo+needle valve
+    water_control_mode: str = "constant"
+    # P-controller для water flow (continuous mode):
+    # больше воды → больше reflux → выше ABV → меньше отбор
+    water_target_T_head_C: float = 78.4
+    water_kp: float = 0.4  # +1°C T_head → +40% water flow
+    water_flow_min_lpm: float = 0.5
+    water_flow_max_lpm: float = 5.0
     # Smooth mode: target T_head, при превышении — снижение duty (P-controller)
     smooth_target_T_head_C: float = 78.4   # сразу над азеотропом
     smooth_kp: float = 0.25                # 1°C превышения → −25% duty
@@ -716,16 +728,30 @@ class Controller:
 
         elif st.phase == Phase.BODY:
             outs.heater_power = r.p_work / 100.0 * power_scale
-            # Stage 11: takeoff_mode='smooth' использует P-controller по T_head
-            # вместо фиксированного PWM. Это эмулирует ручную регулировку
-            # «по температуре в узле отбора», даёт лучше ABV у азеотропа.
-            if r.takeoff_mode == "smooth":
+            # Stage 11/16: 3 режима управления отбором
+            if r.takeoff_mode == "continuous":
+                # Stage 16: клапан спирта всегда OPEN, регулировка через
+                # water flow (servo+needle на main condenser). Manual mode.
+                self.duty_current = 1.0
+                outs.valve_takeoff = True
+            elif r.takeoff_mode == "smooth":
+                # Stage 11: adaptive PWM с P-controller (БКУ-07М style)
                 duty = self._smooth_duty(t_head_corr)
                 self.duty_current = duty
-                outs.valve_takeoff = self._pwm(t_sim, duty, 5.0)  # быстрый PWM 5с
+                outs.valve_takeoff = self._pwm(t_sim, duty, 5.0)
             else:
+                # 'pwm' — фиксированный duty start-stop
                 self.duty_current = r.duty_body
                 outs.valve_takeoff = self._pwm(t_sim, r.duty_body, r.pwm_period_s)
+
+            # Stage 16: water flow control (continuous mode + hybrid)
+            if r.water_control_mode == "smooth_pid":
+                # P-controller: T_head выше target → больше воды → больше reflux
+                if not math.isnan(t_head_corr):
+                    error_C = t_head_corr - r.water_target_T_head_C
+                    flow_lpm = 2.5 + r.water_kp * error_C * (r.water_flow_max_lpm - r.water_flow_min_lpm)
+                    flow_lpm = max(r.water_flow_min_lpm, min(r.water_flow_max_lpm, flow_lpm))
+                    outs.water_flow_main_lpm = flow_lpm
 
             # Конец тела: T_head стабильно выше порога t_dwell сек
             t_head_over = (

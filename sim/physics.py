@@ -669,6 +669,11 @@ class CondenserState:
     # Stage 10: main bypass (вода больше не идёт в main reflux condenser,
     # vapor пробивается без конденсации)
     main_bypass_closed: bool = False
+    # Stage 16: cooling topology
+    # 'parallel' — main + small condenser независимые circuits (auto-mode БКУ)
+    # 'series'   — main → small последовательно по воде И по спирту
+    #              (manual mode user'а с непрерывной струйкой без клапана)
+    cooling_topology: str = "parallel"
 
 
 class Condenser:
@@ -771,6 +776,10 @@ class Outputs:
     valve_takeoff: bool = False
     valve_water: bool = False
     contactor_enable: bool = False
+    # Stage 16: proportional water flow control через servo+needle valve.
+    # None = не управляем (используется водный клапан on/off через valve_water);
+    # float = setpoint L/min для water_servo_valve
+    water_flow_main_lpm: float | None = None
 
 
 @dataclass
@@ -1000,6 +1009,9 @@ class Still:
         # pressure + ambient T (закрывает 2 из 3 «дыр» сенсоров: давление и
         # phase confirmation).
         self.bme680_atm = None
+        # Stage 16: servo + needle valve для proportional water flow control
+        # (заменяет ручной кран Гофмана). Auto-instantiated при enable_hw().
+        self.water_servo_valve = None
         self._last_ssr_switching = False  # передаётся в DS18B20.read как EMI flag
         self.V_mains = 230.0  # для contactor + valve coil V_supply
 
@@ -1014,7 +1026,8 @@ class Still:
                                    valve_water_snubber: bool = True,
                                    valve_takeoff_class=None,
                                    V_mains: float = 230.0,
-                                   atm_gas_sensors: bool = False):
+                                   atm_gas_sensors: bool = False,
+                                   water_servo_valve: bool = False):
         """Включает hardware-level моделирование сенсоров и SSR.
         Каждый ds_family_* — CounterfeitFamily enum (None = ORIGINAL).
         atm_gas_sensors=True добавляет MQ-3 + BME680 на атмосферной трубке
@@ -1049,6 +1062,14 @@ class Still:
             self.bme680_atm.s.R_gas_baseline_ohm = 50000
         else:
             self.bme680_atm = None
+        # Stage 16: servo+needle valve для прецизионной регулировки воды
+        if water_servo_valve:
+            from hardware import ServoNeedleValve
+            self.water_servo_valve = ServoNeedleValve(
+                flow_max_lpm=5.0, failsafe_open=True,
+            )
+        else:
+            self.water_servo_valve = None
         self.realistic_hw_enabled = True
         return self
 
@@ -1146,6 +1167,14 @@ class Still:
         T_water_in = self.faults.cooling_water_hot if self.faults.cooling_water_hot is not None else 12.0
         self.condenser.s.T_water_in_C = T_water_in
         self.condenser.s.water_valve_open = self.valve_water_open
+        # Stage 16: servo step → актуализирует current flow в condenser
+        if self.water_servo_valve is not None:
+            self.water_servo_valve.step(dt, tap_pressure_bar=2.5)
+            self.condenser.s.water_flow_lpm = self.water_servo_valve.read_flow_lpm()
+            # Открыт если flow > 0.1 L/min (servo angle > ~3°)
+            self.condenser.s.water_valve_open = (
+                self.water_servo_valve.read_flow_lpm() > 0.1
+            )
 
         # 1. Boiler step
         m_dot_vapor, y_vapor_mass, T_boil = self.boiler.step(dt, P_W, P_atm)
@@ -1396,6 +1425,18 @@ class Still:
         self.valve_takeoff_open = outs.valve_takeoff
         self.valve_water_open = outs.valve_water
         self.contactor_enable = outs.contactor_enable
+        # Stage 16: proportional water flow (если controller управляет через
+        # servo+needle valve). Иначе fallback на ручную/постоянную регулировку.
+        if outs.water_flow_main_lpm is not None:
+            if self.water_servo_valve is not None:
+                # Convert flow setpoint to servo angle (linear approx)
+                pct = (outs.water_flow_main_lpm
+                       / self.water_servo_valve.s.flow_max_lpm) * 100
+                self.water_servo_valve.set_flow_pct(pct)
+                # actual flow updated in step() → передастся в condenser
+            else:
+                # Servo не установлен — пишем напрямую в condenser
+                self.condenser.s.water_flow_lpm = outs.water_flow_main_lpm
 
     def read_sensors(self) -> dict:
         """То, что 'ESP читает с DS18B20'. С enable_realistic_hardware()

@@ -785,6 +785,86 @@ class BME680:
 
 
 # ============================================================================
+# SERVO + NEEDLE VALVE (proportional water flow control, stage 16)
+# ============================================================================
+
+@dataclass
+class ServoNeedleValveState:
+    """Игольчатый клапан с приводом от сервопривода для проп. регулировки
+    подачи воды охлаждения. Заменяет ручной кран Гофмана.
+
+    Tap pressure 2-3 bar → needle valve → main reflux condenser → drain.
+    Servo position 0-180° → valve opening 0-100% → flow 0-flow_max L/min.
+    """
+    angle_deg: float = 90.0          # текущая позиция (0=closed, 180=full open)
+    angle_target_deg: float = 90.0   # setpoint от controller
+    flow_max_lpm: float = 5.0        # максимальный flow при full open + tap pressure
+    flow_current_lpm: float = 2.5    # реальный flow rate
+    # Failure modes
+    servo_stuck: bool = False        # шестерёнки сорвало / провод оборван
+    failsafe_open: bool = True       # при servo_stuck → fallback на OPEN (NO config)
+    cycle_count: int = 0             # износ
+    response_lag_s: float = 0.3      # типично 0.3 сек на 60° поворот
+
+
+class ServoNeedleValve:
+    """SG90/MG996R + needle valve DN8. PWM-управляемый servo (50Hz, 1-2 ms).
+    Failure modes:
+    - servo_stuck: gears сорвало / control wire оторван →
+      fail-safe to OPEN (если NO config) — water продолжает течь, safety OK
+    - износ: cycle_count > 100k → gear backlash увеличивается
+    """
+
+    NOMINAL_VOLTAGE = 5.0
+    MAX_CYCLES_BEFORE_BACKLASH = 100_000
+
+    def __init__(self, flow_max_lpm: float = 5.0, failsafe_open: bool = True):
+        self.s = ServoNeedleValveState(
+            flow_max_lpm=flow_max_lpm,
+            failsafe_open=failsafe_open,
+        )
+
+    def set_angle(self, angle_deg: float):
+        """Контроллер устанавливает целевой угол (clamped 0-180)."""
+        self.s.angle_target_deg = max(0, min(180, angle_deg))
+
+    def set_flow_pct(self, pct: float):
+        """Удобная обёртка: 0-100% → angle 0-180°."""
+        self.set_angle(pct * 1.8)
+
+    def step(self, dt: float, tap_pressure_bar: float = 2.5):
+        s = self.s
+        if s.servo_stuck:
+            # Failure mode — servo не двигается
+            if s.failsafe_open:
+                # Spring or gravity-loaded NO config → принудительно открыт
+                target_angle = 180
+            else:
+                target_angle = s.angle_deg  # фрозен на текущем
+        else:
+            target_angle = s.angle_target_deg
+            if abs(target_angle - s.angle_deg) > 1:
+                s.cycle_count += 1
+
+        # Servo response time (response_lag_s на 60° поворот)
+        max_delta = 60 / s.response_lag_s * dt
+        delta = target_angle - s.angle_deg
+        if abs(delta) > max_delta:
+            delta = max_delta if delta > 0 else -max_delta
+        s.angle_deg += delta
+
+        # Flow rate: linear с углом (упрощённо; реал needle valve — Cv vs angle
+        # нелинейная, но для control loop достаточно линейного приближения)
+        opening_frac = s.angle_deg / 180.0
+        # Tap pressure affects flow: P=2.5bar норма, при 1 bar flow меньше
+        pressure_factor = min(1.0, tap_pressure_bar / 2.5)
+        s.flow_current_lpm = s.flow_max_lpm * opening_frac * pressure_factor
+
+    def read_flow_lpm(self) -> float:
+        return self.s.flow_current_lpm
+
+
+# ============================================================================
 # CONTACTOR (coil chatter при low V)
 # ============================================================================
 
