@@ -1231,7 +1231,383 @@ Debounce: контакт считаем «replicating заполнение» т�
 
 В sim: моделируется `LevelSensor` class с параметрами `oxidation_resistance_ohm` (растёт со временем), `bounce_probability` (вероятность ложного срабатывания на каждый dt), `mechanical_stuck` (boolean — не срабатывает совсем). Тесты должны покрыть: работает нормально / окислился (false trigger) / mechanical stuck (молчит) — во всех случаях алгоритм корректно отрабатывает.
 
-### 12.13 Источники (обе волны ресёрча)
+### 12.13 Третья волна ресёрча — operational, electrical, mechanical, edge cases, 2025-2026 landscape
+
+Шесть параллельных проходов: операционные тонкости (русские форумы), procedure калибровки, power quality / RU electrical, algorithmic edge cases, enclosure / mechanical long-term reliability, recent 2024-2026 threads. Около 250 находок, систематизированы ниже.
+
+#### 12.13.1 Mash-type-specific алгоритмы (зерновая / сахарная / фруктовая)
+
+Из forum.homedistiller.ru (треды 29928, 102757, 137594, 44512):
+
+| Тип браги | Особенности | Алгоритмические следствия |
+|---|---|---|
+| **Зерновая** (rye worst) | foam-aggressive, осадок carbonises на ТЭН (burnt aroma), вязкость от крахмала | slow ramp, soft TEN W/cm², longer foam-watch (60–120 sec window после кипения), monitor `dT_kub/dt` для detect нагара |
+| **Сахарная** | clean, low-foam, predictable | базовая модель |
+| **Фруктовая** (apple/pear/etc) | **pectin → elevated methanol в головах**, pulp settles + burns, cider/wine дрожжи дают много aldehydes | **bigger head cut 8–10 % AA** vs 3–5 % для сахарной; per-type T_kub upper limits |
+
+**Что в sim**:
+- Recipe.mash_type ∈ {grain, sugar, fruit, mixed} + density/viscosity profile
+- Foam probability ∝ grain_fraction × P_TEN × dT/dt (стохастический burst)
+- Pectin → MeOH boost в y_vapor: в `initial_mash_composition` для fruit увеличить x_methanol в 5–10× от base
+- «Burnt-on-TEN» state: progressively distorts T_kub vs P_heater slope над сессиями
+- Head_cut_volume_target в recipe = f(mash_type, V_kub, initial_ABV)
+
+#### 12.13.2 Multi-pass pipeline (Run1 → Run2)
+
+Стандартная практика: Run1 = быстрый потстил без cuts «до сухого» (≤5 % в струе) → SS разбавляется до 20–15 % ABV перед Run2 (75–80 % fill) → Run2 = ректификация с cuts.
+
+**Что в sim**:
+- Session.run_type ∈ {potstill, reflux_first, reflux_second}
+- Persisted metadata между прогонами: SS_volume, SS_ABV, SS_congener_load
+- Two-mode state machine — Run1 имеет другой exit (T_kub ≈98–99 + stream <5 %), Run2 — ректификация с cuts
+- Sim chain test: Run1 → Run2 на тех же физических параметрах, продукт второго прогона должен быть значительно крепче
+
+#### 12.13.3 Парковка голов («oborotniy спирт»)
+
+Из azbukavinokura.com (shag-2-peregon), forum.homedistiller.ru (104237, 104994, 6891):
+
+Heads (3 %) + подголовники (5 %) от прошлого прогона сохраняются и либо добавляются в куб следующей сессии, либо ректифицируются отдельным проходом «оборотного спирта». При парковке в кубе **больше congeners → длиннее head phase**.
+
+**Что в sim**:
+- Persistent oborotniy_pool: {V_L, ABV, x_mass (5-component)}
+- При старте сессии — если operator выбрал «co-charge oborotniy» → начальный куб получает дополнительный congener load
+- Cut detector переключается с `dT_head/dt` на **cumulative-volume gate** + methanol-proxy
+- Head cut volume увеличивается пропорционально added congener mass
+
+#### 12.13.4 Gin basket / ароматизация — важный спец-режим
+
+Из forum.homedistiller.ru (287043, 351364, 281487):
+
+Травы/специи в gin basket (или царге пастеризации) **должны активироваться только в фазе BODY**. Если включить во время HEADS — аромат уйдёт с головами безвозвратно. T_head в этом режиме:
+- **Слегка выше** (травы создают доп. Δp)
+- **Шумнее** (absorb некоторое количество reflux)
+
+**Что в sim**:
+- Recipe.gin_basket_enabled: bool
+- Если True: дополнительный Δp +50–200 Pa, T_head_target += 0.3–0.8 °C, noise σ × 2
+- **Critical**: не триггерить heads-end ТОЛЬКО по T_head — обязательно через level sensor или cumulative volume
+
+#### 12.13.5 Re-fermentation в кубе (CO2 outgassing)
+
+Из forum.homedistiller.ru (57106, 51457):
+
+Подмоложенная брага при медленном нагреве **резюмирует CO2 выделение при 30–50 °C** — до начала кипения. Foam/pressure spikes ПЕРЕД любым vapor. Алгоритм может принять за «начало работы» и поведение ломается.
+
+**Fix**: требовать `T_kub > 70 °C` ПЕРЕД любой интерпретацией пены/давления как «approaching boil».
+
+**Что в sim**: 
+- FaultInjection.under_fermented: bool
+- Если True: CO2 generation в boiler при 30–50 °C → foam height и pressure rise независимо от etohanol vapor (m_dot_vapor = 0)
+
+#### 12.13.6 End-of-session разделение Run1 vs Run2
+
+| Trigger | Run1 (потстил) | Run2 (ректификация) |
+|---|---|---|
+| Завершение | T_kub ≈98–99 °C + stream <5 % ABV | T_kub 92–94 °C + T_head creep up |
+| Acetic mash («уксус пошёл») | sour vinegar smell (бактериальная брага) | distinct от oily/heavy tail |
+
+**Что в sim**: distinct exit conditions per run_type. Mash_type=acetic → синтетический «sour smell» descriptor exposed в observables (для UI/operator UX).
+
+#### 12.13.7 Recovery после прерывания — phase-aware policy
+
+| Phase / условия в момент прерывания | Recovery action |
+|---|---|
+| Pre-stabilisation (HEAT_UP / STABILIZE) | **Full restart** — column gradient lost |
+| Stable BODY + gap <60 min + T_kub >70 °C | **Re-stabilise** (15–20 мин total reflux) + extended head-recheck → resume |
+| Gap >60 min OR T_kub <60 °C | **Rebuild gradient** = full reset |
+| TAILS interrupt | Часто abandon (продукт уже основном собран) |
+
+**Что в sim**:
+- Checkpoint в SQLite каждые N сек: {phase, t_in_phase, accumulated_V_heads, V_body, V_tails, congener_load_est}
+- On boot: SAFE state forced. Если checkpoint <5 min И сенсоры agree (Δ<3K) → пред-arm с приглашением operator подтвердить. Иначе abort с offer «start new session».
+- **Никогда auto-resume hot still без operator подтверждения**
+
+#### 12.13.8 Power quality — RU/EE electrical environment
+
+Найдено критически важно для нашей среды.
+
+**Mains voltage / power supply**:
+- RU LV grid: 207–253 V (GOST 32144 ±10 %), evening sag до 195–205 V, microcuts 20–200 ms от утилитарных реклоузеров
+- **Online double-conversion UPS 300–600 VA** только для Pi+ESP (не для ТЭНа)
+- **Offline UPS не подходит**: 4–10 ms переключение + грязный square wave → Pi4 PSUs crash
+- AVR/стабилизатор (Resanta, Shtil ~5–10 kVA) **для всего стенда если voltage swings >±15 %**
+
+**RCD / GFCI**:
+- **Type A 30 mA** обязательно — Type AC пропускает DC компоненты от SSR/SMPS, Type B только для VFD
+- Автоматику на **отдельный 10 mA RCBO** от 30 mA heater'а
+- SSR RC snubber leaks 0.5–2 mA capacitively, sheathed heater absorbs moisture → 3–8 mA leakage → суммарно может превысить порог
+- Dry preheat heater при первом включении (low-power) — иначе ложное срабатывание УЗО
+
+**Neutral / PE — критично**:
+- В старых квартирах **floating neutral** даёт 380 V across loads
+- **Isolate cooling water loop с пластиковой муфтой / диэлектрической вставкой** — иначе водопровод (земля) создаёт парасит-путь к корпусу куба
+- Pre-commissioning: socket tester + clamp meter на PE (должно быть ~0 mA) + N-PE voltage с нагрузкой (<2 V healthy, >5 V indicates bad N)
+
+**WiFi 2.4 GHz** — крайне ненадёжно:
+- **Лучше Ethernet через W5500 SPI** на ESP32 для stationary rig — eliminates 2.4 GHz class problems entirely
+- Если Wi-Fi — survey с Wi-Fi Analyzer, channels 1/6/11, external IPEX antenna **≥20 cm от SSR/contactor**
+
+**Grounding советская проводка**:
+- TN-C (no PE) в старых квартирах — UNSAFE для RCD
+- Aluminum wiring (АПВ) oxidises и creep'ает на терминалах
+- Nuclear option: **изоляционный трансформатор 1:1 5–6 kVA** для всей установки (defeats RCD но contains faults локально)
+
+**Lightning protection**:
+- **SPD Class II в щите ~30–60 EUR** = высокая ценность (предотвращает выгорание Wi-Fi/Ethernet после грозы)
+- Add Class III multi-outlet SPD на automation desk
+
+**EMI filter**:
+- Schaffner FN2090 / EPCOS B84113 (10–16 A) на mains input автоматики
+- Clamp-on ferrite (Würth 74271132) на heater control wires + USB cables
+- Star-ground low-voltage side at PE bar
+
+**Что добавить в BOM**:
+- Anti-condensation heater 30–60 Вт DIN + thermostat (см. 12.14.10)
+- Gore-Tex breather в дно щита
+- Type A 30 mA RCD + отдельный 10 mA RCBO для автоматики
+- EMI filter Schaffner на входе
+- Ferrite cores Würth × 4–6
+- SPD Class II + Class III
+- Online double-conversion UPS 300–600 VA (Pi/ESP only)
+- Optionally: W5500 Ethernet модуль вместо Wi-Fi
+
+#### 12.13.9 Calibration & commissioning procedures
+
+**DS18B20 калибровка**:
+- Ice slurry from distillate (без плавающей воды!) + steam point with barometric correction `T_boil = 100 - 0.0366×(1013.25 − P_hPa)`
+- 30+ readings averaged, linear offset+gain fit
+- **Достижимо ±0.05–0.1 °C** (factory 0.5 °C)
+- **Coefficients хранить в Pi SQLite по ROM_ID**, НЕ в DS18B20 EEPROM (TH/TL registers — это alarm thresholds, fragile)
+- Repeat: после термошока в гильзе + every 6–12 months
+
+**BME280 калибровка**:
+- METAR QNH ближайшего аэропорта <30 km same elevation
+- Convert: `P_station = QNH × (1 − 0.0065×h/288.15)^5.255`
+- Drift ±1 hPa/year typical. Mount в сухом, вентилируемом месте
+
+**Flow-rate calibration узла отбора**:
+- Таблица duty × heat-soak: 10/25/50/75/100 % × {cold, 30 min, 2 h}
+- Class-A 100 mL мерный цилиндр + timer
+- Fit nonlinear curve per heat-soak bin
+- Использовать **valve_body_temp как feedforward** для compensation 1.5× heat-soak drift
+
+**Bimetal Klixon тест**:
+- Silicone oil bath + reference thermometer
+- Ramp <2 °C/min через rated trip point
+- Repeat 3× must agree within ±3 °C
+- Annual recalibration
+
+**Термопредохранитель**:
+- Cannot retest non-destructively — sacrifice 2 of 10 sample
+- Verify open within spec at rated T
+- Install rest with traceability (lot, install date)
+- Continuity test at install только ohmmeter <10 mA
+- **Replace preventively every 2 years** или после over-temp event
+
+**Thermowell установка**:
+- **Thermal paste обязательна** (никогда dry); для длинных гильз — **quartz sand + mineral oil** (народный трюк HD.ru)
+- Insertion depth ≥10× диаметр well
+- Calibrate **whole assembly** (sensor + well + paste) — лаг 5–20 sec
+- Log τ (63 % response time) per well_ID
+
+**Smoke testing — beyond lamps**:
+- DS18B20 emulator from another MCU для testing alarm boundaries (78/85/95/105 °C)
+- Decade resistance box (0.1 %) для PT100/NTC если используется
+- E-stop response time с logic analyzer — **target <100 ms**
+- Test loss-of-1-Wire (cut wire), bus shorted, 85.0000 sentinel, watchdog reboot, brown-out at 4.5 V, network loss Pi↔ESP
+
+**Calibrations table в БД**:
+```sql
+CREATE TABLE calibrations (
+  timestamp INTEGER, device_id TEXT, ref_value REAL,
+  raw_value REAL, offset REAL, slope REAL,
+  ambient_T REAL, ambient_P REAL, operator TEXT, notes TEXT
+);
+```
+Plot offset vs time per device — drift visible only после ≥3 calibrations.
+
+#### 12.13.10 Mechanical / enclosure long-term reliability
+
+**Антиконденсация (критично для паровой среды)**:
+- **Anti-condensation heater 30–60 W в щит**, ПОСТОЯННО включён (не interlocked с main contactor)
+- Поддерживает T внутри щита ~5K выше ambient → ничего не конденсируется
+- **Gore-Tex breather в НИЖНЕЙ части щита** (силикагель saturates за недели — не подходит)
+- Conformal coating акрил на Pi/ESP (easier rework чем urethane)
+
+**Терминалы — re-torque schedule**:
+- Copper creep relaxes torque на 20–40 % в первые месяцы
+- **24h, 1 month, then yearly** per IEC 60947-1 Table 4 (M3.5 = 0.8 N·m)
+- Wago push-in для control wiring предпочтительнее (spring force tracks creep)
+- Ferrules на каждую stranded wire, никогда два провода под один винт
+- **Annual thermal-imaging scan под полной нагрузкой** — terminal >10K hotter than neighbors = suspect
+
+**Long-term degradation мониторить**:
+- Накипь на охлаждающем змеевике: log T_water_in/out, +3–5 K creep over baseline = fouling. Citric acid 2 Tbsp/L @ 50 °C × 30 min, every 50–100 hours run-time
+- Накипь на ТЭНе и thermowell: thermowell lag 30–120 sec после нагара → PID overshoot, foamovers. Citric acid soak каждые ~20 batches; descale thermowell отдельно
+- EPDM gaskets: silicone grease ежегодно; daylight test в dark room для leak detection
+- NPT соединения weep после 50–200 циклов → заменить критичные на **Tri-Clamp + EPDM** (gasket = consumable)
+
+**Hose clamps — критичный отказ**:
+- **Oetiker stepless ear clamps (167-series)** на cooling line — 360 ° spring-loaded
+- Worm-gear только 270° + cuts hose под over-torque → blow-off mid-run
+- Double-clamp anything carrying hot water
+- Always barbs, never smooth
+
+**DS18B20 strain relief (mainstreaming reliability)**:
+- **Stranded silicone/PTFE** кабель (никогда solid-core CAT5)
+- **Adhesive heat-shrink 25 mm onto cable** + отдельный mechanical clamp от electrical termination
+- Strong **2.2 kΩ pull-up only at master end**
+- Run length **<10 m**
+- Parasitic mode disabled
+
+**IP54 vs heat tradeoff**:
+- Закрытый IP54 → SSR + Pi heat trapped → MTBF half per +10K above 40 °C
+- **Filter-fan + exhaust louver (Pfannenberg/Hoffman)** maintains IP54 + air exchange
+- Internal temp logger, fan thermostat on 35 °C off 30 °C
+
+**EMC compartmentalization в щите**:
+- **100 mm spacing**: 230V левая зона / 24V средняя / signal правая
+- Cross at 90°
+- **Single solid ground plane** — НЕ split (induces ringing!)
+- Star ground at PE bar
+- Ferrite clamp на каждом sensor cable at cabinet entry
+- RC snubber на катушке контактора **И** на heater leads
+- Shielded sensor cable grounded **ONE end only at controller**
+
+**SSR + Pi orientation**:
+- SSR fins **VERTICAL** (horizontal derate 30 %), SSR mounted **высоко** в щите (горячий воздух идёт вверх)
+- Thermal paste re-apply каждые 2–3 года
+- Pi4 with heatsink + slow fan, mounted ports down
+- Никогда electrolytic caps непосредственно над heat sources
+
+**ESD risk зимой (dry RU/EE air)**:
+- **Wrist strap clipped to PE bar** перед открытием щита
+- **Series resistors 100 Ω–1 kΩ на каждом GPIO** идущем на header
+- **TVS diodes** на long sensor runs
+- Humidify workshop >40 % RH в зиму
+- Never plug/unplug live USB на Pi
+
+#### 12.13.11 Algorithmic edge cases (must-test в sim)
+
+**Hot-start detection**:
+- На ARM: измерять T_kub × 30 sec. Если `T_kub > T_ambient + 15` И `|dT/dt|` мал → propose **warm start**: skip HEAT_UP с reduced ramp, operator confirms
+
+**Mid-session recovery checkpoint policy**: см. 12.14.7
+
+**Recipe versioning**:
+- Mutations создают **immutable recipe_revision** linked to parent
+- Session логирует ordered list of revisions с timestamps
+- **Никаких silent overwrites**
+
+**Concurrent operators**:
+- Session-level advisory lock с operator_id
+- Non-holders: read-only + «request control» handoff
+- Telegram bot — тот же lock
+
+**DB growth strategy**:
+- Hot table 90 дней
+- Nightly archive в compressed DB
+- Weekly `PRAGMA wal_checkpoint(TRUNCATE)` + `VACUUM` во время idle
+
+**Sensor swap (DS18B20 ROM change)**:
+- Map logical roles (T_kub, T_head) to ROM via config file
+- On missing-ROM → SAFE state + prompt operator для re-bind
+- Sanity-check new sensor (reading в plausible band) перед resume
+
+**False-end / stale DONE**:
+- 2h inactivity timer → auto-transition DONE → CLOSED (close water valve, summary emitted)
+
+**Noise stacking — per-input filtering**:
+- P (давление): 1 Hz LPF
+- T (температуры): median + EMA
+- dT/dt: smoothed derivative on filtered T (not raw)
+- PID derivative term clipped
+- ABV computed from filtered T only
+
+**Override hierarchy после E-stop**:
+- **E-stop release ВСЕГДА → SAFE**, никогда не возвращает в prior overrides
+- Operator должен re-assert manual mode explicitly после release
+- Mode hierarchy: Hand > Override > Manual > Auto
+
+**Pre-flight cooling water check**:
+- Перед HEAT_UP: pulse heater короткий, verify `ΔT_water_out < 2 K` И flow-switch active
+- Если ΔT/dt > threshold во время run → immediate cut heater + alarm
+
+#### 12.13.12 2024–2026 landscape
+
+**Software baseline**:
+- **ESPHome ≥2025.10** (major architecture overhaul — memory, security). Pin наш firmware baseline
+- **⚠️ Raspbian 12 ломает GPIO 17/27 relay reliability** (larry-athey/rpi-smart-still wiki, May 2025). **Pin к Raspbian 11** ИЛИ переход на Orange Pi / Banana Pi
+
+**Сенсорные альтернативы (опционально для V1+)**:
+- **MAX31865 PT100** mature ESPHome support, 2/3/4-wire SPI. Для куба/boiler **>125 °C** и в EMI зоне лучше DS18B20
+- **SHT45 Sensirion** (±0.1 °C / ±1 % RH) для cooling water inlet / ambient (НЕ для пара)
+- **PZEM-004T v3** актуальный (v1 EOL) — наш выбор подтверждён
+
+**Reference проекты**:
+- **ys1797/esp32_hd** + OSHWLab schematic — канонический русский ESP32 rectification firmware, отличный reference схемы
+- **larry-athey/rpi-smart-still** — Pi + ESP32, серво на воде, ML отсутствует
+- **larry-athey/boilermaker** — ESP32 master/slave boiler power controller (pattern для будущего multi-boiler)
+- **vitotai/BrewManiacEsp8266** distilling mode — 4 stages (pre-heat / head / heart / tail) — state-machine паттерн совпадает с нашим
+
+**Valve PWM gotcha** (forum.homedistiller.ru 315674):
+- AR-HX-3 12V valves: PWM ~60 % needed to **crack open** — bang-bang valve с малым duty может никогда не открыться
+- **Soft-start ramp**: первое открытие после долгого закрытого periodа — короткий импульс 100 % затем держим до target duty
+
+**Dual-PWM pattern**:
+- Slow PWM (2–5 s period) для boiler SSR
+- Fast PWM (>100 Hz) для precision valve / дефлегматора (у нас не дефлегматор, но идея для будущей точной адаптации duty)
+
+**ML / AI cuts detection**: 
+- В production нет public projects (open opportunity)
+- В академии: LSTM + wavelet для температурного прогнозирования
+- Реалистично: train RNN на reference sessions, использовать для рекомендаций, не для автоматических cuts
+
+**Commercial split**: iStill / GENIO теперь отдельные компании (2024–2025). GENIO ушли в oil-jacketed ODG2 250L/1000L для flavored spirits 50–80 %. Не релевантны для дома.
+
+#### 12.13.13 Резюме: что добавится в BOM, pinout, и алгоритм
+
+**BOM additions**:
+- Anti-condensation heater 30–60 Вт + thermostat
+- Gore-Tex breather в дно щита (Bud Industries или эквивалент)
+- Type A 30 mA RCD + отдельный 10 mA RCBO для автоматики
+- EMI filter Schaffner FN2090 / EPCOS B84113 (10–16 A)
+- Ferrite cores Würth 74271132 × 4–6
+- SPD Class II (Hager/ABB) + Class III strip
+- Online UPS 300–600 VA (Pi/ESP only)
+- Optionally: W5500 Ethernet модуль (вместо Wi-Fi для stationary rig)
+- Optionally: MAX31865 + PT100 thermocouples (для куба/boiler upgrade)
+- Optionally: SHT45 для ambient/cooling-water inlet
+- Hose: Oetiker stepless ear clamps × 4–8
+- Tri-Clamp fittings + EPDM/silicone gaskets для критичных соединений
+- Conformal coating акрил (Plastik 70 или аналог)
+- Wrist strap + ESD mat для сервисных работ
+- Silicone grease (не petroleum) для gasket maintenance
+- Citric acid (для descaling) — кухонный продукт, дёшево
+- Spare thermal fuses × 5 (sacrifice 2 на тест, остальные в запасе)
+
+**Pinout updates**:
+- GPIO для anti-condensation heater control (можно через 5V реле — необязательно: thermostat сам управляет)
+- Если W5500 Ethernet — SPI на GPIO 11/12/13/14 (вместо Wi-Fi)
+- Reserve GPIO для aux contact от контактора (status feedback) — для логирования что контактор реально втянулся
+
+**Algorithm updates (приоритет для sim v2 + controller refactor)**:
+1. Hot-start detection on ARM (skip HEAT_UP если kub warm)
+2. Phase-aware recovery policy (см. 12.14.7)
+3. Pre-flight cooling water check (pulse + ΔT_water verify)
+4. Per-input filtering (P/T/dT filters separate)
+5. Override hierarchy с explicit operator_id и E-stop release → SAFE
+6. Recipe immutable revisions (no silent overwrites)
+7. Stale DONE → CLOSED (2h timer)
+8. Mash type profiles в Recipe (grain / sugar / fruit / mixed)
+9. Run type chain (Run1 → Run2) с persisted SS metadata
+10. Oborotniy pool tracker (V, ABV, congener load)
+11. Gin basket flag + adjusted T_head detection tolerance
+12. Re-fermentation guard: require T_kub > 70 °C перед any «approaching boil» interpretation
+13. Cumulative dirty hours counter → warn при maintenance
+14. Soft-start ramp для valves (после длительного закрытия)
+
+### 12.14 Источники (все три волны ресёрча)
 
 Подобранные ветки и материалы (на момент мая 2026):
 
@@ -1356,6 +1732,69 @@ Debounce: контакт считаем «replicating заполнение» т�
 - [Падение температуры в процессе ректификации (348438)](https://forum.homedistiller.ru/index.php?topic=348438.0)
 - [Аварийная защита на реле (289280)](https://forum.homedistiller.ru/index.php?topic=289280.0)
 - [Непонятные показания датчиков температуры (282003)](https://forum.homedistiller.ru/index.php?topic=282003.0)
+
+**Третья волна — operational nuances (русские форумы)**:
+
+- [Перегонка пенящейся браги (29928)](https://forum.homedistiller.ru/index.php?topic=29928.0)
+- [Прогорание зерновой браги (102757)](https://forum.homedistiller.ru/index.php?topic=102757.0)
+- [Выброс браги при первой перегонке (127836)](https://forum.homedistiller.ru/index.php?topic=127836.0)
+- [Фруктовая брага парогенератор (137594)](https://forum.homedistiller.ru/index.php?topic=137594.0)
+- [Перегонка браги конспект (159147)](https://forum.homedistiller.ru/index.php?topic=159147.0)
+- [Правильный отбор голов (104237)](https://forum.homedistiller.ru/index.php?topic=104237.160)
+- [Перегонка голов / oborotniy (104994)](https://forum.homedistiller.ru/index.php?topic=104994.20)
+- [Переработка брака (6891)](https://forum.homedistiller.ru/index.php?topic=6891.0)
+- [Ароматные водки через джин-корзину (287043)](https://forum.homedistiller.ru/index.php?topic=287043.40)
+- [Очистка колонны (452)](https://forum.homedistiller.ru/index.php?topic=452.0)
+- [Чистка колонны от хвостов (8161)](https://forum.homedistiller.ru/index.php?topic=8161.0)
+- [Экстренное дображивание браги (57106)](http://forum.homedistiller.ru/index.php?topic=57106.20)
+- [Подготовка браги к первичной дистилляции (1896)](https://forum.homedistiller.ru/index.php?topic=1896.160)
+- [Температурный режим перегонки (6192)](https://forum.homedistiller.ru/index.php?topic=6192.100)
+- [Отсекаю хвосты при 50% (30186)](https://forum.homedistiller.ru/index.php?topic=30186.0)
+- [Органолептика хвостов (34249)](https://forum.homedistiller.ru/index.php?topic=34249.0)
+- [Запах и последствия разных фракций (95035)](https://forum.homedistiller.ru/index.php?topic=95035.0)
+- [Ректификат дурно пахнет (516)](https://forum.homedistiller.ru/index.php?topic=516.40)
+- [azbukavinokura — Перегон из солода](https://www.azbukavinokura.com/solodovaya-braga-peregon/)
+- [azbukavinokura — Шаг 2: перегон](https://www.azbukavinokura.com/shag-2-peregon/)
+- [alcoprof — Температура отсечки тела](https://alcoprof.ru/stati/samogon/temperatura-otbor-tela/)
+- [alcoprof — Дробная перегонка](https://alcoprof.ru/stati/samogon/drobnaya-peregonka/)
+
+**Третья волна — calibration & commissioning**:
+
+- [Cave Pearl — DS18B20 calibration](https://thecavepearlproject.org/2016/03/05/ds18b20-calibration-we-finally-nailed-it/)
+- [K and R Smith — DS18B20 absolute accuracy](https://www.kandrsmith.org/RJS/Misc/Thermometers/absolute_ds18b20.html)
+- [Sensience — Thermal Fuse Application Notes](https://www.sensience.com/wp-content/uploads/2023/10/Thermal-Fuse-Application-Notes.pdf)
+- [Red-Bag — Packed tower inspections](https://www.red-bag.com/engineering-guides/245-bn-eg-ue102-trayed-and-packed-tower-inspections.html)
+- [forum.homedistiller.ru — Датчик в длинной гильзе (25175)](http://forum.homedistiller.ru/index.php?topic=25175.0)
+
+**Третья волна — RU electrical environment**:
+
+- ПУЭ 7-е издание §1.7 (заземление), §7.1 (residential)
+- IEC 60364-4-41/-5-53 (электробезопасность LV installations)
+- GOST 32144 (характеристики электрической энергии)
+
+**Третья волна — mechanical / enclosure**:
+
+- [nVent Hoffman — Climate Control](https://www.nvent.com/en-us/hoffman/enclosure-climate-control)
+- [Pfannenberg — IP54 Filterfans](https://www.pfannenberg.com/en/know-how/thermal-management/pfannenberg-filterfansr/indoor-ip-54-filterfansr/)
+- [CLOU — Conductor creep & thermal cycling](https://clouglobal.com/conductor-creep-and-thermal-cycling-why-copper-and-aluminium-connections-loosen-over-time/)
+- [WAGO — Cage-clamp Q&A](https://www.saddlebrookcontrols.com/wp-content/uploads/10-Cage-Clamp-20-Questions.pdf)
+- [Hull Truth — Oetiker vs worm-gear hose clamps](https://www.thehulltruth.com/boating-forum/1338350-oetiker-clamp-vs-hose-clamp.html)
+- [OpenEnergyMonitor — DS18B20 reliability](https://community.openenergymonitor.org/t/ds18b20-reliability-considerations/9926)
+- [DIY Distilling — Cleaning your still](https://diydistilling.com/how-to-clean-your-still/)
+- [Stockwell — EPDM UV/ozone resistance](https://www.stockwell.com/blog/uv-resistant-gasket-and-ozone-resistant-gasket/)
+- [Rockwell — Electrical noise control](https://literature.rockwellautomation.com/idc/groups/literature/documents/rm/gmc-rm001_-en-p.pdf)
+
+**Третья волна — 2024–2026 landscape**:
+
+- [ESPHome 2025.10 changelog](https://esphome.io/changelog/2025.10.0/)
+- [ESPHome MAX31865 component](https://esphome.io/components/sensor/max31865/)
+- [ESPHome SHT4x component](https://esphome.io/components/sensor/sht4x/)
+- [ys1797/esp32_hd (GitHub)](https://github.com/ys1797/esp32_hd) — канонический русский ESP32 firmware
+- [ys1797 esp32_hd OSHWLab schematic](https://oshwlab.com/ys1797/esp32_hd_auto-c5c760d2ae2a458bbe3f0eacd7513491)
+- [larry-athey/rpi-smart-still Wiki — Raspbian 12 GPIO regression](https://github.com/larry-athey/rpi-smart-still/wiki)
+- [larry-athey/boilermaker — ESP32 master/slave boiler](https://github.com/larry-athey/boilermaker)
+- [vitotai/BrewManiacEsp8266 — distilling mode 4-stage](https://github.com/vitotai/BrewManiacEsp8266)
+- [forum.homedistiller.ru — ESP32+PZEM активная ветка (315674)](https://forum.homedistiller.ru/index.php?topic=315674.0)
 
 ## 13. Dry-тесты — план
 
