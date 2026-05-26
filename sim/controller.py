@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Optional
 
-from still import Outputs, mass_to_abv_vol
+from physics import Outputs, mass_to_abv_vol
 
 
 class Phase(str, Enum):

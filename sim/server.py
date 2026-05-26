@@ -17,7 +17,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from controller import Controller, Mode, Phase, Recipe
-from still import FaultInjection, Outputs, Still, StillState
+from physics import Outputs, Still, StillFaults
 
 
 class SimEngine:
