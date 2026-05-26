@@ -125,20 +125,27 @@ def abv_vol_to_mass_frac_eth(abv_vol: float) -> float:
     return m_e / (m_e + m_w)
 
 
-def initial_mash_composition(abv_vol: float) -> List[float]:
-    """Realistic mash composition: ethanol + water + trace impurities.
-    Trace components scale with ethanol content."""
+# Per-mash-type trace impurity profiles (см. 12.13.1).
+# Базируется на форумных observations: фруктовая дает ~15× больше methanol
+# из-за pectin gestation, зерновая средняя, сахарная самая чистая.
+MASH_PROFILES = {
+    "sugar":  {"meoh": 0.0005, "proh": 0.010, "iso": 0.015},  # clean
+    "grain":  {"meoh": 0.0010, "proh": 0.015, "iso": 0.020},  # baseline
+    "fruit":  {"meoh": 0.0150, "proh": 0.020, "iso": 0.025},  # pectin → MeOH
+    "mixed":  {"meoh": 0.0020, "proh": 0.015, "iso": 0.020},
+}
+
+
+def initial_mash_composition(abv_vol: float, mash_type: str = "grain") -> List[float]:
+    """Realistic mash composition: ethanol + water + trace impurities scaled
+    by ethanol content. Trace ratios depend on mash_type (см. MASH_PROFILES)."""
+    profile = MASH_PROFILES.get(mash_type, MASH_PROFILES["grain"])
     x_eth = abv_vol_to_mass_frac_eth(abv_vol)
     x_water = 1 - x_eth
-    # Trace impurities (realistic ranges for fermentation):
-    # MeOH: 0.05-0.2% of EtOH for grain, 1-2% for fruit
-    # 1-propanol: 0.5-2% of EtOH
-    # isoamyl: 1-4% of EtOH
-    x_meoh = 0.001 * x_eth         # 0.1% of EtOH typical
-    x_proh = 0.015 * x_eth         # 1.5% of EtOH
-    x_iso = 0.020 * x_eth          # 2.0% of EtOH
+    x_meoh = profile["meoh"] * x_eth
+    x_proh = profile["proh"] * x_eth
+    x_iso = profile["iso"] * x_eth
     x_eth_clean = x_eth - x_meoh - x_proh - x_iso
-    # Components: MeOH, EtOH, H2O, 1-PrOH, isoamyl
     return [x_meoh, x_eth_clean, x_water, x_proh, x_iso]
 
 
@@ -169,6 +176,7 @@ class BoilerState:
     probe_fouled_bias_C: float = 0
     probe_fouled_until_t: float = 0
     # параметры браги
+    mash_type: str = "grain"  # grain/sugar/fruit/mixed (см. 12.13.1)
     viscosity_factor: float = 1.0  # 1=clean spirit, 3=grain mash, 5=fruit pulp
     sugar_content_g_L: float = 0  # residual sugar — драйвер пенообразования
     is_boiling: bool = False
@@ -187,11 +195,12 @@ class Boiler:
         self.s = BoilerState()
 
     def set_mash(self, V_L: float, abv_vol: float, viscosity: float = 1.0,
-                 sugar_g_L: float = 0):
+                 sugar_g_L: float = 0, mash_type: str = "grain"):
         self.s.V_total_L = V_L
-        self.s.x_mass = initial_mash_composition(abv_vol)
+        self.s.x_mass = initial_mash_composition(abv_vol, mash_type)
         self.s.viscosity_factor = max(1.0, viscosity)
         self.s.sugar_content_g_L = sugar_g_L
+        self.s.mash_type = mash_type
 
     def step(self, dt: float, P_heater_W: float, P_atm_Pa: float,
              T_ambient_C: float = 22) -> tuple[float, List[float], float]:
@@ -681,8 +690,9 @@ class Still:
         self.P_atm_Pa_base = 101325.0
 
     def set_initial(self, V_L: float = 18, abv_vol: float = 12,
-                    viscosity: float = 1.0, sugar_g_L: float = 0):
-        self.boiler.set_mash(V_L, abv_vol, viscosity, sugar_g_L)
+                    viscosity: float = 1.0, sugar_g_L: float = 0,
+                    mash_type: str = "grain"):
+        self.boiler.set_mash(V_L, abv_vol, viscosity, sugar_g_L, mash_type)
         self.boiler.s.T_bulk_C = 22.0
         self.boiler.s.T_film_C = 22.0
         self.boiler.s.T_walls_C = 22.0
@@ -695,6 +705,15 @@ class Still:
         self.x_tails_mass = [0]*N_COMP
         self.active_receiver = "heads"
         self.heads_full_flag = False
+        # Per-mash-type heads cup volume (см. 12.13.1):
+        # фруктовая — больше methanol → нужно больше выгнать в головы
+        cup_volumes = {
+            "sugar": 0.100,
+            "grain": 0.150,  # baseline
+            "fruit": 0.300,  # 2× для pectin → MeOH safety
+            "mixed": 0.180,
+        }
+        self.heads_cup_volume_L = cup_volumes.get(mash_type, 0.150)
 
     def step(self, dt: float):
         # Pressure drift

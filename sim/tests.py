@@ -19,7 +19,7 @@ from dataclasses import dataclass, field
 from typing import Callable
 
 from physics import Still, Outputs
-from controller import Controller, Mode, Phase, Recipe
+from controller import Controller, MashType, Mode, Phase, Recipe, RunType
 
 
 @dataclass
@@ -31,6 +31,7 @@ class Scenario:
     column_D_m: float = 0.040
     viscosity: float = 1.0
     sugar_g_L: float = 0.0
+    mash_type: str = "grain"
     max_sim_s: int = 6 * 3600
     inject: Callable[..., None] = lambda s, c, t: None
     check: Callable[..., tuple[bool, str]] = lambda s, c: (True, "")
@@ -42,7 +43,8 @@ class Scenario:
 def run(scen: Scenario) -> tuple[bool, str, list[str]]:
     still = Still(column_diameter_m=scen.column_D_m)
     still.set_initial(V_L=scen.V_kub, abv_vol=scen.x_kub_abv,
-                      viscosity=scen.viscosity, sugar_g_L=scen.sugar_g_L)
+                      viscosity=scen.viscosity, sugar_g_L=scen.sugar_g_L,
+                      mash_type=scen.mash_type)
     if scen.pre_heat_T_kub_C is not None:
         # Hot-start: куб уже тёплый (имитация прерванной сессии или ranee)
         still.boiler.s.T_bulk_C = scen.pre_heat_T_kub_C
@@ -483,6 +485,66 @@ def scen_concurrent_pressure_and_hot_water():
     )
 
 
+def scen_sugar_mash_clean():
+    """Сахарная брага: cup голов 100мл, MeOH в головах ~0.04‰ (clean)."""
+    return Scenario(
+        name="сахарная брага — clean heads (MeOH < 0.05‰)",
+        mash_type="sugar",
+        check=lambda s, c: (
+            c.st.phase == Phase.DONE
+            and s.heads_cup_volume_L == 0.100
+            and s.x_heads_mass[0] < 0.0001,  # 0.1‰ — порог clean
+            f"phase={c.st.phase.value} MeOH={s.x_heads_mass[0]*1000:.3f}‰ "
+            f"cup={s.heads_cup_volume_L*1000:.0f}mL",
+        ),
+    )
+
+
+def scen_grain_mash_baseline():
+    """Зерновая брага (baseline): cup 150мл, MeOH 0.1‰."""
+    return Scenario(
+        name="зерновая брага — baseline MeOH",
+        mash_type="grain",
+        check=lambda s, c: (
+            c.st.phase == Phase.DONE
+            and s.heads_cup_volume_L == 0.150
+            and 0.00003 < s.x_heads_mass[0] < 0.0003,
+            f"MeOH={s.x_heads_mass[0]*1000:.3f}‰ cup={s.heads_cup_volume_L*1000:.0f}mL",
+        ),
+    )
+
+
+def scen_fruit_mash_methanol_heavy():
+    """Фруктовая брага: pectin → MeOH ×15. Cup увеличен до 300мл, MeOH в
+    головах должен быть значительно выше grain (>5×)."""
+    return Scenario(
+        name="фруктовая брага — MeOH в головах ≫ grain (pectin)",
+        mash_type="fruit",
+        check=lambda s, c: (
+            c.st.phase == Phase.DONE
+            and s.heads_cup_volume_L == 0.300
+            and s.x_heads_mass[0] > 0.0005,  # минимум 0.5‰ — заметно выше grain
+            f"MeOH={s.x_heads_mass[0]*1000:.3f}‰ cup={s.heads_cup_volume_L*1000:.0f}mL",
+        ),
+    )
+
+
+def scen_run1_potstill():
+    """Run1 (потстил «до сухого»): Mode.POTSTILL + run_type=RUN1, exit по
+    T_kub > 99. Sim survives, T_kub дошёл до stop."""
+    r = Recipe()
+    r.mode = Mode.POTSTILL
+    r.run_type = RunType.RUN1
+    return Scenario(
+        name="Run1 потстил «до сухого»",
+        recipe=r,
+        check=lambda s, c: (
+            c.st.phase == Phase.DONE and s.observables().T_kub_bulk_C > 95,
+            f"phase={c.st.phase.value} T_kub={s.observables().T_kub_bulk_C:.1f}",
+        ),
+    )
+
+
 def scen_hot_start_warm_confirmed():
     """Куб уже на 60°C (прерванная сессия). Warm start confirmed → skip HEAT_UP.
     Phase log должен содержать HOT START alert и не содержать HEAT_UP."""
@@ -605,6 +667,12 @@ SCENARIOS = [
     scen_bimetal_safety(),
     scen_kub_overheat(),
     scen_acknowledge(),
+
+    # Stage 5: mash types (12.13.1) и run types (12.13.2)
+    scen_sugar_mash_clean(),
+    scen_grain_mash_baseline(),
+    scen_fruit_mash_methanol_heavy(),
+    scen_run1_potstill(),
 
     # Stage 4: algorithmic edge cases (12.13.11)
     scen_hot_start_warm_confirmed(),

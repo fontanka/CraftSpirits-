@@ -39,11 +39,40 @@ class Mode(str, Enum):
     REFLUX = "REFLUX"  # ректификация с разделением голов/тела/хвостов
 
 
+class MashType(str, Enum):
+    """Тип браги — влияет на cut sizes и foam profile (см. 12.13.1)."""
+    GRAIN = "grain"   # зерновая — foam-prone, нагар, baseline cuts
+    SUGAR = "sugar"   # сахарная — clean, predictable
+    FRUIT = "fruit"   # фруктовая — pectin → high methanol, larger heads cut
+    MIXED = "mixed"
+
+
+class RunType(str, Enum):
+    """Тип прогона для multi-pass pipeline (см. 12.13.2).
+
+    RUN1 (потстил): быстрый сбор SS (spirit-sieved) «до сухого», без cuts.
+    Exit: T_kub > 99 + ABV в струе < ~5% (косвенно: T_head поднялась).
+
+    RUN2 (ректификация): обычный фракционный сбор с heads/body/tails.
+    Используется когда сессия питается от Run1 SS или свежей браги напрямую.
+    """
+    RUN1 = "run1_potstill"
+    RUN2 = "run2_reflux"
+    DIRECT = "direct"  # одиночная сессия без явного pipeline tagging
+
+
 @dataclass
 class Recipe:
     """Параметры сессии, обычно загружаются из БД."""
 
     mode: Mode = Mode.REFLUX
+    mash_type: MashType = MashType.GRAIN  # см. 12.13.1
+    run_type: RunType = RunType.DIRECT  # см. 12.13.2
+
+    # Run1 / потстил exit condition (когда run_type=RUN1):
+    # обычно «до сухого» — T_kub высоко И T_head поднялась (струя <5% ABV)
+    run1_t_kub_done_C: float = 99.0
+    run1_t_head_climb_C: float = 90.0  # T_head вышла из азеотропа = пошла вода
 
     # Целевая мощность по фазам, %
     p_heat_up: float = 100
