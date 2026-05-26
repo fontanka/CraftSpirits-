@@ -289,6 +289,16 @@ class Boiler:
         s.is_boiling = is_boiling
         s.m_dot_vapor_kg_s = m_dot_vapor_kg_s
 
+        # Re-fermentation CO2 outgassing (см. 12.13.5):
+        # подмоложенная брага возобновляет ферментацию при медленном прогреве.
+        # CO2 пузыри генерируют foam ДО любого кипения, при T_kub 30-50°C.
+        # Это для тестирования re-fermentation guard в controller.
+        if (getattr(s, "_under_fermented", False)
+                and 30 < s.T_bulk_C < 50 and not s.foam_active):
+            P_co2_per_min = 0.05 * (s.T_bulk_C - 30) / 20  # пик ~50°C
+            if random.random() < P_co2_per_min / 60 * dt:
+                s.foam_active = True
+
         # Foam-over stochastic event
         # Higher probability with: high sugar, high fill ratio, high Q, viscosity
         fill_ratio = s.V_total_L / p.V_max_L
@@ -612,6 +622,8 @@ class StillFaults:
     estop_pressed: bool = False
     bimetal_tripped: bool = False
     pi_disconnected: bool = False
+    # Подмоложенная брага: CO2 outgassing 30-50°C ДО кипения (см. 12.13.5)
+    under_fermented: bool = False
 
 
 @dataclass
@@ -691,8 +703,36 @@ class Still:
 
     def set_initial(self, V_L: float = 18, abv_vol: float = 12,
                     viscosity: float = 1.0, sugar_g_L: float = 0,
-                    mash_type: str = "grain"):
+                    mash_type: str = "grain",
+                    oborotniy_V_L: float = 0.0,
+                    oborotniy_abv: float = 0.0):
+        """Initialize boiler. Опционально co-charge oborotniy спирта (см. 12.13.3):
+        oborotniy_V_L литров с oborotniy_abv % ABV дополнительно к основной браге.
+        Это эмулирует «парковку голов» из прошлых прогонов — повышает initial
+        congener load → длиннее head phase."""
         self.boiler.set_mash(V_L, abv_vol, viscosity, sugar_g_L, mash_type)
+
+        # Co-charge oborotniy: mass-weighted average composition
+        if oborotniy_V_L > 0 and oborotniy_abv > 0:
+            from physics import initial_mash_composition
+            # Oborotniy = previously distilled spirit с парковкой голов:
+            # сильно концентрированный по methanol/propanol/isoamyl
+            # vs fresh mash. Используем «fruit» profile как proxy (worst-case).
+            x_oborotniy = initial_mash_composition(oborotniy_abv, "fruit")
+
+            rho_main = 950.0  # approx mash density
+            rho_oborotniy = 850.0  # approx high-ABV spirit
+            m_main = V_L / 1000 * rho_main
+            m_obor = oborotniy_V_L / 1000 * rho_oborotniy
+            m_total = m_main + m_obor
+            new_x = []
+            for i in range(N_COMP):
+                new_x.append(
+                    (self.boiler.s.x_mass[i] * m_main + x_oborotniy[i] * m_obor)
+                    / m_total
+                )
+            self.boiler.s.x_mass = new_x
+            self.boiler.s.V_total_L = V_L + oborotniy_V_L
         self.boiler.s.T_bulk_C = 22.0
         self.boiler.s.T_film_C = 22.0
         self.boiler.s.T_walls_C = 22.0
@@ -716,6 +756,9 @@ class Still:
         self.heads_cup_volume_L = cup_volumes.get(mash_type, 0.150)
 
     def step(self, dt: float):
+        # Propagate under-fermented flag to boiler (для re-fermentation CO2)
+        self.boiler.s._under_fermented = self.faults.under_fermented
+
         # Pressure drift
         P_atm = self.P_atm_Pa_base
         if self.faults.pressure_drift:

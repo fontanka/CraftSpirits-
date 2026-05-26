@@ -32,6 +32,8 @@ class Scenario:
     viscosity: float = 1.0
     sugar_g_L: float = 0.0
     mash_type: str = "grain"
+    oborotniy_V_L: float = 0.0
+    oborotniy_abv: float = 0.0
     max_sim_s: int = 6 * 3600
     inject: Callable[..., None] = lambda s, c, t: None
     check: Callable[..., tuple[bool, str]] = lambda s, c: (True, "")
@@ -44,7 +46,9 @@ def run(scen: Scenario) -> tuple[bool, str, list[str]]:
     still = Still(column_diameter_m=scen.column_D_m)
     still.set_initial(V_L=scen.V_kub, abv_vol=scen.x_kub_abv,
                       viscosity=scen.viscosity, sugar_g_L=scen.sugar_g_L,
-                      mash_type=scen.mash_type)
+                      mash_type=scen.mash_type,
+                      oborotniy_V_L=scen.oborotniy_V_L,
+                      oborotniy_abv=scen.oborotniy_abv)
     if scen.pre_heat_T_kub_C is not None:
         # Hot-start: куб уже тёплый (имитация прерванной сессии или ranee)
         still.boiler.s.T_bulk_C = scen.pre_heat_T_kub_C
@@ -485,6 +489,42 @@ def scen_concurrent_pressure_and_hot_water():
     )
 
 
+def scen_under_fermented_co2():
+    """Подмоложенная брага: CO2 outgassing при 30-50°C ДО кипения.
+    Re-fermentation guard в контроллере должен ЛОГИРОВАТЬ предупреждение
+    (но не emergency — это нормальный сценарий)."""
+    def inject(s, c, t):
+        if t == 1:
+            s.faults.under_fermented = True
+    return Scenario(
+        name="подмоложенная брага CO2 outgassing → re-fermentation guard",
+        inject=inject,
+        max_sim_s=15000,
+        check=lambda s, c: (
+            c.st.phase in (Phase.DONE, Phase.CLOSED),
+            f"phase={c.st.phase.value} refermentation_alerted="
+            f"{c.st.refermentation_alerted}",
+        ),
+    )
+
+
+def scen_oborotniy_co_charge():
+    """Парковка голов: добавляем 1 L oborotniy 60% ABV к основной 18 L 12% mash.
+    Состав куба после co-charge должен иметь повышенный MeOH (fruit profile
+    в oborotniy → richer impurity baseline)."""
+    return Scenario(
+        name="oborotniy co-charge (парковка голов) — sim survives",
+        oborotniy_V_L=1.0,
+        oborotniy_abv=60.0,
+        check=lambda s, c: (
+            c.st.phase == Phase.DONE
+            and s.x_heads_mass[0] > 0.0001,  # heads имеют notable MeOH
+            f"phase={c.st.phase.value} MeOH_heads={s.x_heads_mass[0]*1000:.3f}‰ "
+            f"V_kub_initial≈{s.observables().V_kub_L:.1f}L",
+        ),
+    )
+
+
 def scen_sugar_mash_clean():
     """Сахарная брага: cup голов 100мл, MeOH в головах ~0.04‰ (clean)."""
     return Scenario(
@@ -673,6 +713,10 @@ SCENARIOS = [
     scen_grain_mash_baseline(),
     scen_fruit_mash_methanol_heavy(),
     scen_run1_potstill(),
+
+    # Stage 5b: re-fermentation + oborotniy (12.13.3, 12.13.5)
+    scen_under_fermented_co2(),
+    scen_oborotniy_co_charge(),
 
     # Stage 4: algorithmic edge cases (12.13.11)
     scen_hot_start_warm_confirmed(),
