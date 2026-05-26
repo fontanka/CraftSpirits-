@@ -1,10 +1,24 @@
 """
-FastAPI сервер: крутит физику + контроллер на background-таске,
-пушит состояние в UI по WebSocket ~10 Hz, принимает команды (старт/пауза/
-скорость/fault-injection) по HTTP.
+sim/server.py — FastAPI сервер для v2 sim.
+
+Крутит физику + контроллер на background-таске, пушит state в UI через
+WebSocket ~10 Hz, принимает команды (start/pause/speed/inject) по HTTP.
+
+Использование:
+    pip install -r requirements.txt  (fastapi, uvicorn, pydantic)
+    python server.py [--port 8000]
+
+UI:
+- Browser: http://localhost:8000/
+- TUI: python tui.py [--host localhost --port 8000]
+
+Подходит для v2: boiler+column+condenser+hardware (15-var valves, DS18B20
+с counterfeit, SSR thermal, contactor chatter). Поддерживает realtime
+и fast-forward (1× / 10× / 100× / max).
 """
 from __future__ import annotations
 
+import argparse
 import asyncio
 import json
 import time
@@ -17,112 +31,207 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from controller import Controller, Mode, Phase, Recipe
-from physics import Outputs, Still, StillFaults
+from hardware import CounterfeitFamily, CoilClass
+from physics import Still
 
 
 class SimEngine:
+    """Background sim engine. Один Still + Controller, управляется через
+    play/pause/speed/inject."""
+
     def __init__(self):
-        self.still = Still()
-        self.controller = Controller()
-        self.speed = 10.0  # 10x по умолчанию — иначе скучно
+        self.still: Still | None = None
+        self.controller: Controller | None = None
+        self.speed: float = 10.0  # 10× default — иначе скучно ждать
+        self.max_speed: bool = False
+        self.paused: bool = True  # стартует на паузе до /api/start
+        self.pi_alive: bool = True
+        self.history: list[dict] = []
+        self.history_max = 1800  # ~30 min @ 1Hz dump
+        self._last_history_t: float = -1e9
+        self._cfg = {
+            "V_kub": 18.0, "x_kub_abv": 12.0, "mash_type": "grain",
+            "viscosity": 1.0, "sugar_g_L": 0.0,
+            "oborotniy_V_L": 0.0, "oborotniy_abv": 0.0,
+            "column_D_m": 0.040,
+        }
+        self._hw_opts: dict = {}
+        self._recipe = Recipe()
+        self._alerts_seen_count = 0
+
+    # ---- lifecycle ----
+
+    def configure(self, **cfg):
+        for k, v in cfg.items():
+            if k in self._cfg:
+                self._cfg[k] = v
+
+    def configure_hw(self, **opts):
+        self._hw_opts = dict(opts) if opts else {}
+
+    def new_session(self, mode: str = "REFLUX"):
+        """Создать новый Still + Controller с текущим _cfg и _hw_opts."""
+        self.still = Still(column_diameter_m=self._cfg["column_D_m"])
+        self.still.set_initial(
+            V_L=self._cfg["V_kub"],
+            abv_vol=self._cfg["x_kub_abv"],
+            viscosity=self._cfg["viscosity"],
+            sugar_g_L=self._cfg["sugar_g_L"],
+            mash_type=self._cfg["mash_type"],
+            oborotniy_V_L=self._cfg["oborotniy_V_L"],
+            oborotniy_abv=self._cfg["oborotniy_abv"],
+        )
+        if self._hw_opts:
+            kwargs = {}
+            for k, v in self._hw_opts.items():
+                if k.startswith("ds_family_") and isinstance(v, str):
+                    try:
+                        kwargs[k] = CounterfeitFamily(v)
+                    except ValueError:
+                        kwargs[k] = CounterfeitFamily.ORIGINAL
+                elif k == "valve_takeoff_class" and isinstance(v, str):
+                    try:
+                        kwargs[k] = CoilClass(v)
+                    except ValueError:
+                        pass
+                else:
+                    kwargs[k] = v
+            self.still.enable_realistic_hardware(**kwargs)
+
+        self._recipe = Recipe(mode=Mode(mode))
+        self.controller = Controller(self._recipe)
+        self.controller.start(0.0, initial_sensors=self.still.read_sensors())
+        self.history.clear()
+        self._last_history_t = -1e9
+        self._alerts_seen_count = 0
         self.paused = False
-        self.pi_alive = True  # имитация связи Pi ↔ ESP
-        self.history: list[dict] = []  # для графиков (T_kub, T_head, time)
-        self.history_max = 1800  # 1800 точек
 
     def reset(self):
-        self.still.reset()
-        self.controller = Controller()
+        self.still = None
+        self.controller = None
         self.history.clear()
-        self.paused = False
-        self.pi_alive = True
-
-    def start_session(self, recipe: Recipe):
-        self.controller.start(self.still.t_sim_s, recipe)
+        self.paused = True
 
     def step(self, dt: float):
-        if self.paused:
+        if self.paused or self.still is None or self.controller is None:
             return
         sensors = self.still.read_sensors()
-        outs = self.controller.tick(self.still.t_sim_s, sensors, pi_alive=self.pi_alive)
+        outs = self.controller.tick(self.still.t_sim_s, sensors,
+                                    pi_alive=self.pi_alive)
         self.still.apply_outputs(outs)
         self.still.step(dt)
 
-        # История для графика (раз в ~5 sim-секунд)
-        if not self.history or self.still.t_sim_s - self.history[-1]["t"] > 5:
+        # History dump каждые 5 sim-сек
+        if self.still.t_sim_s - self._last_history_t >= 5:
+            self._last_history_t = self.still.t_sim_s
+            o = self.still.observables()
+            r = self.still.read_sensors()
             self.history.append({
                 "t": self.still.t_sim_s,
-                "T_kub": self.still.s.T_kub,
-                "T_head": self.still.s.T_head,
-                "T_water_out": self.still.s.T_water_out,
-                "duty": self.still.s.duty_avg,
-                "P_kW": self.still.s.P_heater_kW,
+                "T_kub": o.T_kub_bulk_C,
+                "T_head": o.T_head_C,
+                "T_water_out": o.T_water_out_C,
+                "P_kW": o.P_heater_kW,
+                "V_body_L": self.still.V_body_L,
+                "V_heads_L": self.still.V_heads_L,
                 "phase": self.controller.st.phase.value,
+                "ssr_T_j": r.get("ssr_T_junction_C"),
+                "valve_Cv_ratio": (
+                    self.still.valve_takeoff_hw.s.Cv_effective /
+                    max(self.still.valve_takeoff_hw.Cv_nominal, 0.01)
+                    if self.still.realistic_hw_enabled else None
+                ),
             })
             if len(self.history) > self.history_max:
                 self.history = self.history[-self.history_max:]
 
     def snapshot(self) -> dict:
-        s = self.still.s
-        sensors = self.still.read_sensors()
+        if self.still is None or self.controller is None:
+            return {
+                "ready": False, "paused": True,
+                "speed": "max" if self.max_speed else self.speed,
+                "config": self._cfg, "hw_options": self._hw_opts,
+                "history": [],
+            }
+        s = self.still
         ctrl = self.controller
+        o = s.observables()
+        r = s.read_sensors()
         return {
-            "t_sim_s": self.still.t_sim_s,
-            "speed": self.speed,
+            "ready": True,
             "paused": self.paused,
             "pi_alive": self.pi_alive,
-            # физика
+            "speed": "max" if self.max_speed else self.speed,
+            "t_sim_s": s.t_sim_s,
+            "config": self._cfg,
+            "hw_options": self._hw_opts,
             "physical": {
-                "T_kub": s.T_kub,
-                "T_head": s.T_head,
-                "T_water_in": s.T_water_in,
-                "T_water_out": s.T_water_out,
-                "V_kub_L": s.V_kub,
-                "V_product_L": s.V_product,
-                "x_kub_abv": sensors["x_kub_abv"],
-                "x_head_abv": sensors["x_head_abv"],
-                "x_product_abv": sensors["x_product_abv"],
-                "is_boiling": s.is_boiling,
-                "P_heater_kW": s.P_heater_kW,
-                "P_to_vapor_kW": s.P_to_vapor_kW,
-                "m_dot_vapor_gps": s.m_dot_vapor_gps,
-                "duty_avg": s.duty_avg,
-                "P_atm_hPa": s.P_atm_Pa / 100,
+                "T_kub": o.T_kub_bulk_C,
+                "T_kub_wall": o.T_kub_wall_C,
+                "T_head": o.T_head_C,
+                "T_water_in": o.T_water_in_C,
+                "T_water_out": o.T_water_out_C,
+                "V_kub_L": o.V_kub_L,
+                "x_kub_abv": o.x_kub_abv,
+                "x_head_abv": o.x_head_abv,
+                "x_product_abv": o.x_product_abv,
+                "is_boiling": o.is_boiling,
+                "P_heater_kW": o.P_heater_kW,
+                "m_dot_vapor_gps": o.m_dot_vapor_g_s,
+                "P_atm_hPa": o.P_atm_hPa,
+                "flooded": o.flooded,
+                "weeping": o.weeping,
+                "dry_out": o.dry_out,
+                "foam": o.foam_active,
             },
-            # выходы железа
+            "product": {
+                "V_heads_L": s.V_heads_L,
+                "V_body_L": s.V_body_L,
+                "V_tails_L": s.V_tails_L,
+                "active": o.active_receiver,
+                "x_head_abv": o.x_head_abv,
+                "x_product_abv": o.x_product_abv,
+            },
             "outputs": {
-                "heater_power": self.still.out.heater_power,
-                "valve_takeoff": self.still.out.valve_takeoff,
-                "valve_water": self.still.out.valve_water,
-                "contactor_enable": self.still.out.contactor_enable,
+                "heater_pct": int(s.heater_power * 100),
+                "valve_takeoff": s.valve_takeoff_open,
+                "valve_water": s.valve_water_open,
+                "contactor": s.contactor_enable,
             },
-            # контроллер
             "controller": {
                 "phase": ctrl.st.phase.value,
-                "phase_elapsed_s": self.still.t_sim_s - ctrl.st.phase_started_at,
+                "phase_elapsed_s": s.t_sim_s - ctrl.st.phase_started_at,
                 "duty_current": ctrl.duty_current,
-                "alerts": ctrl.st.alerts[-10:],  # последние 10
-                "session_elapsed_s": (
-                    self.still.t_sim_s - ctrl.session_started_at
-                    if ctrl.session_started_at is not None
-                    else 0
-                ),
+                "alerts": ctrl.st.alerts[-12:],
+                "n_alerts": len(ctrl.st.alerts),
+                "last_alert": ctrl.st.last_alert,
+                "suspect_sensor": ctrl.suspect_sensor,
+                "suspect_ratio": ctrl.suspect_analyzer.last_ratio,
             },
-            # неисправности
+            "hardware": {
+                "enabled": s.realistic_hw_enabled,
+                "ssr_T_j": r.get("ssr_T_junction_C"),
+                "ssr_fail_short": r.get("ssr_fail_short"),
+                "valve_Cv": r.get("valve_takeoff_Cv"),
+                "valve_T_coil": r.get("valve_takeoff_T_coil"),
+                "valve_stiction": r.get("valve_takeoff_stiction_N"),
+                "contactor_chatter": r.get("contactor_chatter"),
+                "contactor_wear": r.get("contactor_wear"),
+                "ds_T_head_crc": r.get("ds_T_head_crc_fails"),
+                "ds_T_head_sent": r.get("ds_T_head_sentinels"),
+                "ds_T_kub_crc": r.get("ds_T_kub_crc_fails"),
+                "ds_T_kub_sent": r.get("ds_T_kub_sentinels"),
+            },
             "faults": {
-                "sensor_t_kub_fail": self.still.fault.sensor_t_kub_fail,
-                "sensor_t_head_fail": self.still.fault.sensor_t_head_fail,
-                "sensor_t_water_out_fail": self.still.fault.sensor_t_water_out_fail,
-                "valve_takeoff_stuck_open": self.still.fault.valve_takeoff_stuck_open,
-                "valve_takeoff_stuck_closed": self.still.fault.valve_takeoff_stuck_closed,
-                "ssr_heater_stuck_on": self.still.fault.ssr_heater_stuck_on,
-                "water_cutoff": self.still.fault.water_cutoff,
-                "estop_pressed": self.still.fault.estop_pressed,
-                "bimetal_tripped": self.still.fault.bimetal_tripped,
+                "pressure_drift": s.faults.pressure_drift,
+                "water_cutoff": s.faults.water_cutoff,
+                "cooling_water_hot": s.faults.cooling_water_hot,
+                "estop": s.faults.estop_pressed,
+                "bimetal": s.faults.bimetal_tripped,
+                "under_fermented": s.faults.under_fermented,
                 "pi_disconnected": not self.pi_alive,
             },
-            # история для графика
-            "history": self.history[-360:],  # последние 30 минут sim-time при 5с шаге
+            "history": self.history[-600:],
         }
 
 
@@ -130,19 +239,22 @@ engine = SimEngine()
 
 
 async def physics_loop():
-    """Крутит физику. dt sim = wall_dt * speed."""
-    last_wall = time.monotonic()
+    """Background asyncio task. Один tick = sim_dt sim-секунд физики +
+    sleep wall_clock based on speed."""
+    SUB_DT = 1.0  # sim seconds per substep — устойчиво для нашей физики
     while True:
-        now = time.monotonic()
-        wall_dt = now - last_wall
-        last_wall = now
-        sim_dt = wall_dt * engine.speed
-        # Несколько шагов с малым dt для устойчивости интегрирования
-        n_substeps = max(1, int(sim_dt))
-        sub_dt = sim_dt / n_substeps
-        for _ in range(n_substeps):
-            engine.step(sub_dt)
-        await asyncio.sleep(0.1)
+        if engine.paused or not engine.still:
+            await asyncio.sleep(0.05)
+            continue
+        if engine.max_speed:
+            # Жарим без сна — 50 substeps за turn для batch processing
+            for _ in range(50):
+                engine.step(SUB_DT)
+            await asyncio.sleep(0)  # отдать loop control
+        else:
+            # 1 sim-sec в 1/speed wall-sec
+            engine.step(SUB_DT)
+            await asyncio.sleep(SUB_DT / max(engine.speed, 0.1))
 
 
 @asynccontextmanager
@@ -155,71 +267,28 @@ async def lifespan(app: FastAPI):
 app = FastAPI(lifespan=lifespan)
 
 
+# ---- HTTP API ----
+
 class StartReq(BaseModel):
     mode: str = "REFLUX"
-    V_kub: float = 18.0
-    x_kub_abv: float = 12.0  # начальная крепость браги, об. %
-    # Параметры рецепта — опционально override
-    p_work: float | None = None
-    duty_heads: float | None = None
-    duty_body: float | None = None
-    duty_tails: float | None = None
-    pwm_period_s: float | None = None
-    t_stable_s: int | None = None
-
-
-def abv_vol_to_mass(abv_vol: float) -> float:
-    """Об.% → массовая доля. Грубо."""
-    v = abv_vol / 100.0
-    rho_eth, rho_h2o = 0.789, 0.998
-    m_eth = v * rho_eth
-    m_h2o = (1 - v) * rho_h2o
-    return m_eth / (m_eth + m_h2o)
+    V_kub: float | None = None
+    x_kub_abv: float | None = None
+    mash_type: str | None = None
+    viscosity: float | None = None
+    sugar_g_L: float | None = None
+    oborotniy_V_L: float | None = None
+    oborotniy_abv: float | None = None
+    column_D_m: float | None = None
+    hw: dict | None = None
 
 
 @app.post("/api/start")
 async def start(req: StartReq):
-    engine.reset()
-    engine.still.s.V_kub = req.V_kub
-    engine.still.s.x_kub_mass = abv_vol_to_mass(req.x_kub_abv)
-    # Стартовая T куба — холодная
-    engine.still.s.T_kub = 22.0
-    engine.still.s.T_head = 22.0
-    engine.still.s.T_water_out = engine.still.s.T_water_in
-
-    recipe = Recipe(mode=Mode(req.mode))
-    if req.p_work is not None:
-        recipe.p_work = req.p_work
-    if req.duty_heads is not None:
-        recipe.duty_heads = req.duty_heads
-    if req.duty_body is not None:
-        recipe.duty_body = req.duty_body
-    if req.duty_tails is not None:
-        recipe.duty_tails = req.duty_tails
-    if req.pwm_period_s is not None:
-        recipe.pwm_period_s = req.pwm_period_s
-    if req.t_stable_s is not None:
-        recipe.t_stable_s = req.t_stable_s
-
-    engine.start_session(recipe)
-    return {"ok": True}
-
-
-@app.post("/api/stop")
-async def stop():
-    engine.controller.request_stop(engine.still.t_sim_s)
-    return {"ok": True}
-
-
-@app.post("/api/ack")
-async def ack_emergency():
-    engine.controller.acknowledge_emergency()
-    return {"ok": True}
-
-
-@app.post("/api/reset")
-async def reset():
-    engine.reset()
+    cfg = {k: v for k, v in req.dict().items() if v is not None and k in engine._cfg}
+    engine.configure(**cfg)
+    if req.hw is not None:
+        engine.configure_hw(**req.hw)
+    engine.new_session(req.mode)
     return {"ok": True}
 
 
@@ -229,30 +298,103 @@ async def pause():
     return {"ok": True, "paused": engine.paused}
 
 
+@app.post("/api/stop")
+async def stop():
+    if engine.controller:
+        engine.controller.request_stop(
+            engine.still.t_sim_s if engine.still else 0
+        )
+    return {"ok": True}
+
+
+@app.post("/api/reset")
+async def reset():
+    engine.reset()
+    return {"ok": True}
+
+
+@app.post("/api/ack")
+async def ack():
+    if engine.controller and engine.still:
+        engine.controller.acknowledge_emergency()
+    return {"ok": True}
+
+
 class SpeedReq(BaseModel):
-    speed: float
+    speed: float | str  # "max" или число
 
 
 @app.post("/api/speed")
 async def set_speed(req: SpeedReq):
-    engine.speed = max(0.1, min(1000.0, req.speed))
-    return {"ok": True, "speed": engine.speed}
+    if isinstance(req.speed, str) and req.speed.lower() == "max":
+        engine.max_speed = True
+    else:
+        try:
+            v = float(req.speed)
+            engine.max_speed = False
+            engine.speed = max(0.1, min(10000.0, v))
+        except (ValueError, TypeError):
+            return {"ok": False, "error": "bad speed"}
+    return {"ok": True, "speed": "max" if engine.max_speed else engine.speed}
 
 
 class FaultReq(BaseModel):
     key: str
-    value: bool
+    value: float | bool | str | None = None
 
 
 @app.post("/api/fault")
-async def set_fault(req: FaultReq):
-    if req.key == "pi_disconnected":
-        engine.pi_alive = not req.value
-    elif hasattr(engine.still.fault, req.key):
-        setattr(engine.still.fault, req.key, req.value)
+async def inject_fault(req: FaultReq):
+    if not engine.still:
+        return {"ok": False, "error": "no session"}
+    f = engine.still.faults
+    k = req.key
+    v = req.value
+    if k == "pi_disconnected":
+        engine.pi_alive = not bool(v) if v is not None else False
+        return {"ok": True}
+    if k == "water_cutoff":
+        f.water_cutoff = bool(v) if v is not None else True
+    elif k == "bimetal_tripped":
+        f.bimetal_tripped = True
+    elif k == "estop":
+        f.estop_pressed = True
+    elif k == "pressure_drift":
+        f.pressure_drift = bool(v) if v is not None else True
+    elif k == "cooling_water_hot":
+        f.cooling_water_hot = float(v) if v is not None else 25.0
+    elif k == "under_fermented":
+        f.under_fermented = True
+    elif k == "valve_dribble":
+        if engine.still.realistic_hw_enabled:
+            engine.still.valve_takeoff_hw.s.leak_rate_ml_s_when_closed = float(v or 1.0)
+            engine.still.valve_takeoff_hw.s.seat_debris = True
+    elif k == "ssr_fail_short":
+        if engine.still.realistic_hw_enabled:
+            engine.still.ssr_heater.s.fail_short = True
+    elif k == "valve_T_coil_hot":
+        if engine.still.realistic_hw_enabled:
+            engine.still.valve_takeoff_hw.s.T_coil_C = float(v or 85)
+    elif k == "V_mains":
+        if engine.still.realistic_hw_enabled:
+            engine.still.V_mains = float(v or 230)
+    elif k == "sensor_T_kub_disconnect":
+        if engine.still.realistic_hw_enabled:
+            engine.still.ds18b20_T_kub.disconnect()
+    elif k == "clear":
+        # Сбросить inject-able faults (не all — некоторые latch)
+        f.water_cutoff = False
+        f.cooling_water_hot = None
+        f.pressure_drift = False
+        engine.pi_alive = True
     else:
-        return {"ok": False, "error": f"unknown fault {req.key}"}
+        return {"ok": False, "error": f"unknown fault {k}"}
     return {"ok": True}
+
+
+@app.get("/api/snapshot")
+async def get_snapshot():
+    return engine.snapshot()
 
 
 @app.websocket("/ws")
@@ -262,20 +404,34 @@ async def ws_endpoint(websocket: WebSocket):
         while True:
             snap = engine.snapshot()
             await websocket.send_json(snap)
-            await asyncio.sleep(0.1)
+            await asyncio.sleep(0.2)  # 5Hz UI update
     except WebSocketDisconnect:
         return
 
 
+# ---- static files ----
+
+STATIC_DIR = Path(__file__).parent / "static"
+
+
 @app.get("/")
 async def index():
-    return FileResponse(Path(__file__).parent / "static" / "index.html")
+    return FileResponse(STATIC_DIR / "index.html")
 
 
-app.mount("/static", StaticFiles(directory=Path(__file__).parent / "static"), name="static")
+app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--port", type=int, default=8000)
+    ap.add_argument("--host", default="0.0.0.0")
+    args = ap.parse_args()
+
+    import uvicorn
+    uvicorn.run("server:app", host=args.host, port=args.port,
+                reload=False, log_level="warning")
 
 
 if __name__ == "__main__":
-    import uvicorn
-
-    uvicorn.run("server:app", host="0.0.0.0", port=8000, reload=False, log_level="info")
+    main()

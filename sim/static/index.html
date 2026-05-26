@@ -3,561 +3,595 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width,initial-scale=1" />
-<title>CraftSpirits — Симулятор LM-ректификации</title>
+<title>CraftSpirits — Sim v2</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
 <style>
   :root {
-    --bg: #f1f5f9;
-    --card: #ffffff;
-    --border: #cbd5e1;
-    --ink: #0f172a;
-    --muted: #64748b;
-    --red: #dc2626;
-    --orange: #ea580c;
-    --yellow: #ca8a04;
-    --green: #16a34a;
-    --blue: #2563eb;
-    --lightblue: #0284c7;
-    --purple: #7c3aed;
-    --bg-red: #fee2e2;
-    --bg-orange: #ffedd5;
-    --bg-yellow: #fef9c3;
-    --bg-green: #dcfce7;
-    --bg-blue: #dbeafe;
-    --bg-lightblue: #e0f2fe;
-    --bg-purple: #ede9fe;
+    --bg: #0f172a; --card: #1e293b; --card2: #334155;
+    --ink: #e2e8f0; --muted: #94a3b8; --border: #475569;
+    --green: #22c55e; --blue: #3b82f6; --red: #ef4444;
+    --orange: #f97316; --yellow: #eab308; --purple: #a855f7;
+    --teal: #14b8a6;
   }
   * { box-sizing: border-box; }
   body {
     margin: 0; padding: 0;
-    font: 13px/1.4 -apple-system, system-ui, "Segoe UI", Roboto, sans-serif;
     background: var(--bg); color: var(--ink);
+    font: 13px/1.4 -apple-system, system-ui, "Segoe UI", Roboto, sans-serif;
   }
   header {
-    background: #0f172a; color: white; padding: 10px 20px;
-    display: flex; align-items: center; gap: 16px;
-    border-bottom: 2px solid #1e293b;
+    background: #020617; padding: 8px 14px;
+    display: flex; align-items: center; gap: 16px; flex-wrap: wrap;
+    border-bottom: 1px solid var(--border);
   }
-  header h1 { margin: 0; font-size: 16px; font-weight: 700; letter-spacing: 0.5px; }
-  header .sub { color: #94a3b8; font-size: 12px; }
-  header .right { margin-left: auto; display: flex; gap: 12px; align-items: center; }
-  header .pill {
-    padding: 3px 10px; border-radius: 12px; font-size: 11px;
-    background: #1e293b; color: white; border: 1px solid #334155;
+  header h1 { margin: 0; font-size: 14px; font-weight: 700; letter-spacing: 0.5px; color: var(--teal); }
+  .grid {
+    display: grid; gap: 8px;
+    grid-template-columns: 270px 1fr 280px;
+    padding: 8px;
   }
-  header .pill.alive { background: #16a34a; }
-  header .pill.dead { background: #dc2626; }
-  main {
-    display: grid; grid-template-columns: 1fr 360px;
-    gap: 12px; padding: 12px; max-width: 1600px; margin: 0 auto;
-  }
-  section { display: grid; gap: 10px; }
   .card {
-    background: var(--card); border-radius: 10px; padding: 12px;
+    background: var(--card); padding: 10px; border-radius: 6px;
     border: 1px solid var(--border);
   }
-  .card h2 { margin: 0 0 8px 0; font-size: 11px; letter-spacing: 1px;
-    text-transform: uppercase; color: var(--muted); font-weight: 700; }
-
-  /* Temperature cards row */
-  .temps { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
-  .temp-card {
-    padding: 10px; border-radius: 8px; border: 2px solid;
+  .card h2 {
+    font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px;
+    margin: 0 0 6px; color: var(--muted); font-weight: 600;
   }
-  .temp-card .lbl { font-size: 10px; font-weight: 600; letter-spacing: 0.5px;
-    text-transform: uppercase; }
-  .temp-card .val { font: 700 28px/1 'JetBrains Mono', monospace; margin-top: 4px; }
-  .temp-card .unit { font-size: 14px; font-weight: 600; margin-left: 2px; }
-  .temp-card .sub { font-size: 10px; color: var(--muted); margin-top: 4px; }
-  .temp-card.kub { background: var(--bg-red); border-color: var(--red); color: #7f1d1d; }
-  .temp-card.head { background: var(--bg-orange); border-color: var(--orange); color: #7c2d12; }
-  .temp-card.water-in { background: var(--bg-blue); border-color: var(--blue); color: #1e3a8a; }
-  .temp-card.water-out { background: var(--bg-lightblue); border-color: var(--lightblue); color: #075985; }
-  .temp-card.nan { background: #fef2f2; border-color: #dc2626; }
-  .temp-card.nan .val { color: var(--red); font-size: 16px; padding-top: 8px; }
-
-  /* Phase badge */
-  .phase-row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+  .card + .card { margin-top: 8px; }
+  .row { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+  .row > * { flex: 1; min-width: 0; }
+  button, select, input {
+    background: var(--card2); color: var(--ink); border: 1px solid var(--border);
+    padding: 4px 8px; border-radius: 4px; font-size: 12px; font-family: inherit;
+  }
+  button:hover { background: var(--border); cursor: pointer; }
+  button.primary { background: var(--green); border-color: var(--green); color: white; }
+  button.danger { background: var(--red); border-color: var(--red); color: white; }
+  button.warning { background: var(--orange); border-color: var(--orange); color: white; }
+  button.small { padding: 2px 6px; font-size: 11px; }
+  label { color: var(--muted); font-size: 11px; display: block; margin-bottom: 2px; }
+  .kv { display: flex; justify-content: space-between; padding: 2px 0; }
+  .kv .v { font-family: ui-monospace, monospace; font-weight: 600; }
+  .kv .k { color: var(--muted); }
   .phase-tag {
-    display: inline-block; padding: 6px 16px; border-radius: 16px;
-    font-weight: 700; font-size: 14px; letter-spacing: 1px;
-    background: #e2e8f0; color: var(--ink); border: 2px solid #94a3b8;
+    display: inline-block; padding: 3px 10px; border-radius: 12px;
+    font-weight: 700; font-size: 12px; letter-spacing: 0.5px;
   }
-  .phase-tag[data-p="HEAT_UP"] { background: var(--bg-red); border-color: var(--red); color: #7f1d1d; }
-  .phase-tag[data-p="STABILIZE"], .phase-tag[data-p="STABILIZE2"] { background: var(--bg-yellow); border-color: var(--yellow); color: #713f12; }
-  .phase-tag[data-p="HEADS"] { background: var(--bg-orange); border-color: var(--orange); color: #7c2d12; }
-  .phase-tag[data-p="BODY"] { background: var(--bg-green); border-color: var(--green); color: #14532d; }
-  .phase-tag[data-p="TAILS"] { background: var(--bg-purple); border-color: var(--purple); color: #4c1d95; }
-  .phase-tag[data-p="SHUTDOWN"], .phase-tag[data-p="DONE"] { background: #e2e8f0; border-color: #64748b; color: #1f2937; }
-  .phase-tag[data-p="EMERGENCY"] { background: var(--red); color: white; border-color: #7f1d1d; animation: pulse 1s infinite; }
-  @keyframes pulse {
-    0%, 100% { opacity: 1; } 50% { opacity: 0.6; }
+  .phase-IDLE { background: var(--card2); }
+  .phase-INIT, .phase-PRE_FLIGHT { background: var(--card2); }
+  .phase-HEAT_UP, .phase-STABILIZE, .phase-STABILIZE2 { background: var(--yellow); color: black; }
+  .phase-HEADS { background: var(--orange); color: white; }
+  .phase-BODY { background: var(--green); color: white; }
+  .phase-TAILS { background: var(--blue); color: white; }
+  .phase-SHUTDOWN, .phase-DONE, .phase-CLOSED { background: var(--purple); color: white; }
+  .phase-EMERGENCY { background: var(--red); color: white; animation: blink 0.6s ease-in-out infinite alternate; }
+  .phase-PAUSE { background: var(--muted); }
+  @keyframes blink { from { opacity: 1; } to { opacity: 0.5; } }
+  .charts { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .chart-box { background: var(--card); padding: 8px; border-radius: 6px; border: 1px solid var(--border); height: 220px; }
+  .alerts {
+    max-height: 200px; overflow-y: auto;
+    font-family: ui-monospace, monospace; font-size: 11px;
   }
-
-  /* Output indicators */
-  .outs { display: grid; grid-template-columns: 2fr 1fr 1fr 1fr; gap: 8px; align-items: center; }
-  .led { display: inline-flex; align-items: center; gap: 6px; font-weight: 600;
-    padding: 6px 10px; border-radius: 6px; background: #f1f5f9; border: 1px solid #cbd5e1; font-size: 12px; }
-  .led-dot { width: 10px; height: 10px; border-radius: 50%; background: #94a3b8; }
-  .led.on { background: var(--bg-green); border-color: var(--green); color: #14532d; }
-  .led.on .led-dot { background: var(--green); box-shadow: 0 0 6px var(--green); }
-  .led.off-bad { background: var(--bg-red); border-color: var(--red); color: #7f1d1d; }
-
-  .power-bar { position: relative; width: 100%; height: 26px; background: #e2e8f0; border-radius: 6px;
-    overflow: hidden; border: 1px solid var(--border); }
-  .power-bar .fill { background: linear-gradient(90deg, #16a34a, #65a30d); height: 100%; transition: width 0.3s; }
-  .power-bar .lbl { position: absolute; inset: 0; display: flex; align-items: center;
-    justify-content: center; font-weight: 700; color: #064e3b; font-size: 12px; }
-
-  /* Duty cycle bar */
-  .duty-bar { width: 100%; height: 18px; background: #e2e8f0; border-radius: 4px; overflow: hidden; border: 1px solid var(--border); }
-  .duty-bar .fill { background: linear-gradient(90deg, var(--orange), var(--yellow)); height: 100%; transition: width 0.3s; }
-
-  /* Chart */
-  #chart { width: 100%; height: 280px; background: #f8fafc; border-radius: 6px;
-    border: 1px solid var(--border); }
-
-  /* Controls */
-  .btn-row { display: flex; gap: 8px; flex-wrap: wrap; }
-  button {
-    padding: 8px 14px; border-radius: 6px; border: 1px solid var(--border);
-    background: white; color: var(--ink); font-weight: 600; cursor: pointer;
-    font-size: 12px;
+  .alert { padding: 2px 0; border-bottom: 1px solid var(--border); color: var(--orange); }
+  .led {
+    display: inline-block; width: 10px; height: 10px; border-radius: 50%;
+    background: var(--card2); margin-right: 4px; vertical-align: middle;
   }
-  button:hover { background: #f1f5f9; }
-  button.primary { background: var(--green); color: white; border-color: #15803d; }
-  button.primary:hover { background: #15803d; }
-  button.danger { background: var(--red); color: white; border-color: #7f1d1d; }
-  button.danger:hover { background: #b91c1c; }
-  button.warning { background: var(--orange); color: white; border-color: #9a3412; }
-
-  /* Sidebar */
-  .sidebar { display: grid; gap: 10px; align-content: start; }
-
-  .field { display: flex; align-items: center; gap: 8px; font-size: 12px; }
-  .field label { min-width: 120px; color: var(--muted); }
-  .field input { width: 70px; padding: 4px 6px; border: 1px solid var(--border); border-radius: 4px;
-    font-family: monospace; }
-
-  .fault-list { display: grid; gap: 4px; max-height: 250px; overflow: auto; }
-  .fault-toggle { display: flex; align-items: center; justify-content: space-between;
-    padding: 6px 8px; background: #f8fafc; border-radius: 4px; border: 1px solid #e2e8f0;
-    font-size: 12px; cursor: pointer; }
-  .fault-toggle:hover { background: #f1f5f9; }
-  .fault-toggle.active { background: var(--bg-red); border-color: var(--red); color: #7f1d1d; font-weight: 600; }
-
-  .alerts { font-size: 11px; max-height: 200px; overflow: auto; font-family: monospace; }
-  .alert { padding: 3px 0; border-bottom: 1px solid #f1f5f9; }
-  .alert.crit { color: var(--red); font-weight: 600; }
-  .alert.warn { color: var(--orange); }
-
-  .stat-row { display: flex; justify-content: space-between; padding: 3px 0; font-size: 12px; }
-  .stat-row .lbl { color: var(--muted); }
-  .stat-row .val { font-family: monospace; font-weight: 600; }
-
-  .speed-buttons { display: flex; gap: 4px; flex-wrap: wrap; }
-  .speed-buttons button { padding: 4px 10px; font-size: 11px; }
-  .speed-buttons button.active { background: var(--blue); color: white; border-color: var(--blue); }
+  .led.on { background: var(--green); box-shadow: 0 0 6px var(--green); }
+  .led.warn { background: var(--orange); box-shadow: 0 0 6px var(--orange); }
+  .led.err { background: var(--red); box-shadow: 0 0 6px var(--red); }
+  .badge {
+    display: inline-block; font-size: 10px; padding: 1px 6px;
+    border-radius: 8px; background: var(--card2); margin: 2px;
+  }
+  .badge.warn { background: var(--orange); color: white; }
+  .badge.err { background: var(--red); color: white; }
+  .badge.ok { background: var(--green); color: white; }
+  .progress {
+    height: 6px; background: var(--card2); border-radius: 3px; overflow: hidden;
+  }
+  .progress > div { height: 100%; background: var(--green); transition: width 0.3s; }
+  .small-input { padding: 2px 4px; font-size: 11px; }
+  .speed-bar { display: flex; gap: 2px; }
+  .speed-bar button { padding: 3px 6px; font-size: 11px; }
+  .speed-bar button.active { background: var(--teal); border-color: var(--teal); color: black; font-weight: bold; }
 </style>
 </head>
 <body>
+
 <header>
-  <h1>CRAFTSPIRITS · SIMULATOR</h1>
-  <span class="sub">LM-ректификация · обратный холодильник + узел отбора</span>
-  <div class="right">
-    <span class="pill" id="conn">connecting…</span>
-    <span class="pill" id="pi-status">Pi: ?</span>
-    <span class="pill" id="time-pill">t = 0:00:00</span>
-    <span class="pill" id="speed-pill">×10</span>
-  </div>
+  <h1>🥃 CraftSpirits Sim v2</h1>
+  <span id="phase-display" class="phase-tag phase-IDLE">IDLE</span>
+  <span style="color: var(--muted); font-family: ui-monospace, monospace;">
+    t_sim: <span id="t-sim">0s</span>
+  </span>
+  <span class="speed-bar">
+    <button data-speed="0.5">0.5×</button>
+    <button data-speed="1">1×</button>
+    <button data-speed="10" class="active">10×</button>
+    <button data-speed="100">100×</button>
+    <button data-speed="1000">1000×</button>
+    <button data-speed="max">⚡MAX</button>
+  </span>
+  <button id="btn-pause" class="small">⏸ Pause</button>
+  <button id="btn-ack" class="small warning">ACK emergency</button>
+  <button id="btn-reset" class="small danger">Reset</button>
+  <span style="margin-left:auto; color: var(--muted); font-size: 11px;">
+    WS: <span id="ws-state">…</span>
+  </span>
 </header>
 
-<main>
-  <section>
-    <!-- Phase + Outputs -->
-    <div class="card">
-      <h2>Фаза процесса</h2>
-      <div class="phase-row">
-        <span class="phase-tag" id="phase" data-p="IDLE">IDLE</span>
-        <span style="color: var(--muted)">в фазе: <span id="phase-elapsed" style="font-family: monospace">—</span></span>
-        <span style="color: var(--muted); margin-left: auto;">сессия: <span id="session-elapsed" style="font-family: monospace">—</span></span>
-      </div>
-    </div>
+<div class="grid">
 
-    <!-- Temperatures -->
+  <!-- Левая колонка: setup + sensors -->
+  <div>
     <div class="card">
-      <h2>Температуры</h2>
-      <div class="temps">
-        <div class="temp-card kub" id="tc-kub">
-          <div class="lbl">T КУБ</div>
-          <div><span class="val" id="t-kub">—</span><span class="unit">°C</span></div>
-          <div class="sub" id="t-kub-sub">brage</div>
-        </div>
-        <div class="temp-card head" id="tc-head">
-          <div class="lbl">T ГОЛОВА (паровая зона)</div>
-          <div><span class="val" id="t-head">—</span><span class="unit">°C</span></div>
-          <div class="sub" id="t-head-sub">до обратного холодильника</div>
-        </div>
-        <div class="temp-card water-in" id="tc-water-in">
-          <div class="lbl">T ВХ. ВОДА</div>
-          <div><span class="val" id="t-water-in">—</span><span class="unit">°C</span></div>
-        </div>
-        <div class="temp-card water-out" id="tc-water-out">
-          <div class="lbl">T ВЫХ. ВОДА</div>
-          <div><span class="val" id="t-water-out">—</span><span class="unit">°C</span></div>
-          <div class="sub" id="t-water-sub">ΔT —</div>
-        </div>
-      </div>
-    </div>
-
-    <!-- Outputs -->
-    <div class="card">
-      <h2>Выходы железа (то, что ESP пишет в GPIO)</h2>
-      <div class="outs">
+      <h2>Setup</h2>
+      <div class="row">
         <div>
-          <div style="font-size: 11px; color: var(--muted); margin-bottom: 4px;">МОЩНОСТЬ ТЭН</div>
-          <div class="power-bar">
-            <div class="fill" id="power-fill" style="width: 0%"></div>
-            <div class="lbl" id="power-lbl">0% · 0.0 kW</div>
-          </div>
-          <div style="font-size: 10px; color: var(--muted); margin-top: 6px;">
-            ШИМ узла отбора (duty avg)
-          </div>
-          <div class="duty-bar">
-            <div class="fill" id="duty-fill" style="width: 0%"></div>
-          </div>
-          <div style="font-size: 10px; color: var(--muted); margin-top: 2px;">
-            duty = <span id="duty-val">0%</span>
-          </div>
-        </div>
-        <div class="led" id="led-takeoff">
-          <span class="led-dot"></span><span>УЗЕЛ ОТБОРА</span>
-        </div>
-        <div class="led" id="led-water">
-          <span class="led-dot"></span><span>ВОДА</span>
-        </div>
-        <div class="led" id="led-contactor">
-          <span class="led-dot"></span><span>КОНТАКТОР</span>
-        </div>
-      </div>
-    </div>
-
-    <!-- Chart -->
-    <div class="card">
-      <h2>Графики (последние 30 мин sim-времени)</h2>
-      <canvas id="chart" width="900" height="280"></canvas>
-      <div style="display: flex; gap: 16px; font-size: 11px; color: var(--muted); margin-top: 4px;">
-        <span><span style="display: inline-block; width: 12px; height: 3px; background: var(--red); vertical-align: middle;"></span> T_kub</span>
-        <span><span style="display: inline-block; width: 12px; height: 3px; background: var(--orange); vertical-align: middle;"></span> T_head</span>
-        <span><span style="display: inline-block; width: 12px; height: 3px; background: var(--blue); vertical-align: middle;"></span> T_water_out</span>
-      </div>
-    </div>
-
-    <!-- Statistics -->
-    <div class="card">
-      <h2>Куб и продукт</h2>
-      <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 16px;">
-        <div>
-          <div class="stat-row"><span class="lbl">V куб</span><span class="val" id="v-kub">— L</span></div>
-          <div class="stat-row"><span class="lbl">Крепость куба (об.%)</span><span class="val" id="x-kub">—</span></div>
-          <div class="stat-row"><span class="lbl">Кипит?</span><span class="val" id="is-boiling">—</span></div>
-          <div class="stat-row"><span class="lbl">Атм. давление</span><span class="val" id="p-atm">— hPa</span></div>
-          <div class="stat-row"><span class="lbl">Поток пара</span><span class="val" id="m-vapor">— g/s</span></div>
+          <label>V_kub (L)</label>
+          <input id="V_kub" type="number" value="18" min="5" max="50" step="0.5" class="small-input" />
         </div>
         <div>
-          <div class="stat-row"><span class="lbl">V продукт</span><span class="val" id="v-prod">— L</span></div>
-          <div class="stat-row"><span class="lbl">Крепость продукта</span><span class="val" id="x-prod">—</span></div>
-          <div class="stat-row"><span class="lbl">Крепость пара (head)</span><span class="val" id="x-head">—</span></div>
-          <div class="stat-row"><span class="lbl">P на пар</span><span class="val" id="p-vapor">— kW</span></div>
+          <label>x_kub ABV %</label>
+          <input id="x_kub_abv" type="number" value="12" min="5" max="25" step="0.5" class="small-input" />
+        </div>
+      </div>
+      <div class="row" style="margin-top: 6px;">
+        <div>
+          <label>Mash</label>
+          <select id="mash_type" class="small-input">
+            <option value="sugar">sugar</option>
+            <option value="grain" selected>grain</option>
+            <option value="fruit">fruit</option>
+            <option value="mixed">mixed</option>
+          </select>
+        </div>
+        <div>
+          <label>Mode</label>
+          <select id="mode" class="small-input">
+            <option value="REFLUX" selected>REFLUX</option>
+            <option value="POTSTILL">POTSTILL</option>
+          </select>
+        </div>
+      </div>
+      <div class="row" style="margin-top: 6px;">
+        <div>
+          <label>Visc</label>
+          <input id="viscosity" type="number" value="1.0" min="1" max="5" step="0.5" class="small-input" />
+        </div>
+        <div>
+          <label>Sugar g/L</label>
+          <input id="sugar_g_L" type="number" value="0" min="0" max="100" step="5" class="small-input" />
+        </div>
+      </div>
+      <div class="row" style="margin-top: 6px;">
+        <div>
+          <label>Oborotniy L</label>
+          <input id="oborotniy_V_L" type="number" value="0" min="0" max="5" step="0.5" class="small-input" />
+        </div>
+        <div>
+          <label>Oborotniy ABV%</label>
+          <input id="oborotniy_abv" type="number" value="0" min="0" max="80" step="5" class="small-input" />
+        </div>
+      </div>
+      <div style="margin-top: 8px;">
+        <label><input type="checkbox" id="hw_enabled" /> Realistic hardware</label>
+      </div>
+      <div id="hw_panel" style="display:none; padding: 6px; background: var(--card2); border-radius: 4px; margin-top: 6px;">
+        <div class="row">
+          <div>
+            <label>DS18B20 T_head</label>
+            <select id="ds_T_head" class="small-input">
+              <option value="original">original</option>
+              <option value="A1">A1 fake</option>
+              <option value="A2">A2 (0°C hang)</option>
+              <option value="B1">B1</option>
+              <option value="B2">B2</option>
+              <option value="C">C (worst σ)</option>
+              <option value="D1">D1</option>
+            </select>
+          </div>
+          <div>
+            <label>DS18B20 T_kub</label>
+            <select id="ds_T_kub" class="small-input">
+              <option value="original">original</option>
+              <option value="A1">A1</option>
+              <option value="A2">A2</option>
+              <option value="B1">B1</option>
+              <option value="B2">B2</option>
+              <option value="C">C</option>
+              <option value="D1">D1</option>
+            </select>
+          </div>
+        </div>
+        <div class="row" style="margin-top: 6px;">
+          <div><label><input type="checkbox" id="ssr_genuine" checked /> SSR genuine (Crydom)</label></div>
+        </div>
+        <div class="row" style="margin-top: 6px;">
+          <div>
+            <label>V_mains (V)</label>
+            <input id="V_mains" type="number" value="230" min="170" max="260" step="5" class="small-input" />
+          </div>
+          <div>
+            <label>Valve class</label>
+            <select id="valve_class" class="small-input">
+              <option value="B" selected>B (130°C)</option>
+              <option value="F">F (155°C)</option>
+              <option value="A">A (105°C)</option>
+            </select>
+          </div>
+        </div>
+      </div>
+      <button id="btn-start" class="primary" style="width:100%; margin-top:8px;">▶ Start session</button>
+    </div>
+
+    <div class="card">
+      <h2>Sensors</h2>
+      <div class="kv"><span class="k">T_kub</span><span class="v" id="s-T_kub">—</span></div>
+      <div class="kv"><span class="k">T_head</span><span class="v" id="s-T_head">—</span></div>
+      <div class="kv"><span class="k">T_water_in</span><span class="v" id="s-T_water_in">—</span></div>
+      <div class="kv"><span class="k">T_water_out</span><span class="v" id="s-T_water_out">—</span></div>
+      <div class="kv"><span class="k">P_heater</span><span class="v" id="s-P_kW">—</span></div>
+      <div class="kv"><span class="k">P_atm</span><span class="v" id="s-P_atm">—</span></div>
+      <div class="kv"><span class="k">m_dot vapor</span><span class="v" id="s-m_dot">—</span></div>
+    </div>
+
+    <div class="card">
+      <h2>Kub state</h2>
+      <div class="kv"><span class="k">V</span><span class="v" id="kub-V">—</span></div>
+      <div class="kv"><span class="k">ABV</span><span class="v" id="kub-ABV">—</span></div>
+      <div class="kv"><span class="k">Boiling</span><span class="v" id="kub-boil">—</span></div>
+      <div id="kub-tags" style="margin-top:4px;"></div>
+    </div>
+  </div>
+
+  <!-- Центр: charts -->
+  <div>
+    <div class="card">
+      <h2>Phase progress</h2>
+      <div class="kv">
+        <span class="k">phase elapsed</span>
+        <span class="v" id="phase-elapsed">—</span>
+      </div>
+      <div class="kv">
+        <span class="k">heater</span>
+        <span class="v"><span id="heater-pct">0</span>% <div class="progress" style="display:inline-block;width:80px;vertical-align:middle"><div id="heater-bar" style="width:0%"></div></div></span>
+      </div>
+      <div class="kv">
+        <span class="k">valve takeoff</span>
+        <span class="v"><span id="vt-led" class="led"></span><span id="vt-state">—</span></span>
+      </div>
+      <div class="kv">
+        <span class="k">valve water</span>
+        <span class="v"><span id="vw-led" class="led"></span><span id="vw-state">—</span></span>
+      </div>
+      <div class="kv">
+        <span class="k">contactor</span>
+        <span class="v"><span id="ct-led" class="led"></span><span id="ct-state">—</span></span>
+      </div>
+    </div>
+
+    <div class="charts" style="margin-top:8px;">
+      <div class="chart-box"><canvas id="chart-T"></canvas></div>
+      <div class="chart-box"><canvas id="chart-P"></canvas></div>
+      <div class="chart-box"><canvas id="chart-V"></canvas></div>
+      <div class="chart-box"><canvas id="chart-HW"></canvas></div>
+    </div>
+
+    <div class="card" style="margin-top:8px;">
+      <h2>Product receivers</h2>
+      <div class="row">
+        <div>
+          <div class="kv"><span class="k">Active</span><span class="v" id="prod-active">—</span></div>
+          <div class="kv"><span class="k">V_heads</span><span class="v" id="prod-heads">—</span></div>
+          <div class="kv"><span class="k">V_body</span><span class="v" id="prod-body">—</span></div>
+          <div class="kv"><span class="k">V_tails</span><span class="v" id="prod-tails">—</span></div>
+        </div>
+        <div>
+          <div class="kv"><span class="k">x_head_abv</span><span class="v" id="prod-x-head">—</span></div>
+          <div class="kv"><span class="k">x_product_abv</span><span class="v" id="prod-x-body">—</span></div>
         </div>
       </div>
     </div>
+  </div>
 
-  </section>
-
-  <aside class="sidebar">
-    <!-- Session controls -->
+  <!-- Правая колонка: hardware + faults + alerts -->
+  <div>
     <div class="card">
-      <h2>Запуск сессии</h2>
-      <div class="field"><label>Режим</label>
-        <select id="mode" style="padding: 4px 6px; border: 1px solid var(--border); border-radius: 4px;">
-          <option value="REFLUX">Ректификация (LM)</option>
-          <option value="POTSTILL">Потстил (без разделения)</option>
-        </select>
-      </div>
-      <div class="field"><label>V куба, L</label><input id="v-init" type="number" value="18" step="0.5"></div>
-      <div class="field"><label>Крепость, об.%</label><input id="x-init" type="number" value="12" step="1"></div>
-      <div class="field"><label>P_work, %</label><input id="pwork" type="number" value="60" step="5"></div>
-      <div class="field"><label>Duty heads</label><input id="duty-heads" type="number" value="0.15" step="0.05"></div>
-      <div class="field"><label>Duty body</label><input id="duty-body" type="number" value="0.40" step="0.05"></div>
-      <div class="field"><label>Duty tails</label><input id="duty-tails" type="number" value="0.70" step="0.05"></div>
-      <div class="field"><label>Stabilize, сек</label><input id="t-stable" type="number" value="600" step="60"></div>
-      <div class="btn-row" style="margin-top: 8px;">
-        <button class="primary" id="btn-start">▶ Старт сессии</button>
-        <button class="danger" id="btn-stop">■ STOP</button>
-        <button id="btn-pause">⏸ Pause</button>
-        <button id="btn-reset">⟲ Reset</button>
-        <button class="warning" id="btn-ack">✓ ACK Emergency</button>
+      <h2>Hardware diagnostics</h2>
+      <div id="hw-block">
+        <div class="kv"><span class="k">SSR T_j</span><span class="v" id="hw-ssr-T_j">—</span></div>
+        <div class="kv"><span class="k">SSR fail_short</span><span class="v" id="hw-ssr-short">—</span></div>
+        <div class="kv"><span class="k">Valve Cv</span><span class="v" id="hw-valve-Cv">—</span></div>
+        <div class="kv"><span class="k">Valve T_coil</span><span class="v" id="hw-valve-T_coil">—</span></div>
+        <div class="kv"><span class="k">Valve stiction</span><span class="v" id="hw-valve-stiction">—</span></div>
+        <div class="kv"><span class="k">Contactor wear</span><span class="v" id="hw-ct-wear">—</span></div>
+        <div class="kv"><span class="k">Suspect sensor</span><span class="v" id="hw-suspect">—</span></div>
+        <div class="kv"><span class="k">DS T_head CRC</span><span class="v" id="hw-ds-head-crc">—</span></div>
+        <div class="kv"><span class="k">DS T_kub CRC</span><span class="v" id="hw-ds-kub-crc">—</span></div>
       </div>
     </div>
 
-    <!-- Speed -->
     <div class="card">
-      <h2>Скорость симуляции</h2>
-      <div class="speed-buttons">
-        <button data-speed="0.1">×0.1</button>
-        <button data-speed="1">×1</button>
-        <button data-speed="10" class="active">×10</button>
-        <button data-speed="60">×60</button>
-        <button data-speed="300">×300</button>
-        <button data-speed="600">×600</button>
+      <h2>Fault injection</h2>
+      <div class="row">
+        <button class="small warning" data-fault="water_cutoff">🚰 cutoff</button>
+        <button class="small warning" data-fault="cooling_water_hot" data-val="25">🔥 hot water</button>
       </div>
-      <div style="font-size: 11px; color: var(--muted); margin-top: 6px;">
-        ×60 = 1 минута реального времени = 1 час sim-времени
+      <div class="row" style="margin-top:4px;">
+        <button class="small warning" data-fault="estop">⛔ E-stop</button>
+        <button class="small warning" data-fault="bimetal_tripped">🌡 bimetal</button>
+      </div>
+      <div class="row" style="margin-top:4px;">
+        <button class="small warning" data-fault="pi_disconnected">🔌 Pi off</button>
+        <button class="small warning" data-fault="pressure_drift">📉 P drift</button>
+      </div>
+      <div class="row" style="margin-top:4px;">
+        <button class="small danger" data-fault="ssr_fail_short">⚡ SSR пробой</button>
+        <button class="small danger" data-fault="valve_dribble" data-val="2">💧 valve leak</button>
+      </div>
+      <div class="row" style="margin-top:4px;">
+        <button class="small danger" data-fault="valve_T_coil_hot" data-val="90">🔥 valve hot</button>
+        <button class="small danger" data-fault="sensor_T_kub_disconnect">📡 T_kub off</button>
+      </div>
+      <div class="row" style="margin-top:4px;">
+        <button class="small" data-fault="clear">🔧 clear soft</button>
       </div>
     </div>
 
-    <!-- Faults -->
     <div class="card">
-      <h2>Fault injection (проверка safety)</h2>
-      <div class="fault-list" id="faults">
-        <!-- буду заполнять JS -->
-      </div>
+      <h2>Alerts (<span id="n-alerts">0</span>)</h2>
+      <div class="alerts" id="alerts-list"></div>
     </div>
+  </div>
 
-    <!-- Alerts log -->
-    <div class="card">
-      <h2>Лог переходов и алертов</h2>
-      <div class="alerts" id="alerts">—</div>
-    </div>
-  </aside>
-</main>
+</div>
 
 <script>
-const FAULT_KEYS = [
-  ["sensor_t_kub_fail",        "Датчик T_kub: NaN"],
-  ["sensor_t_head_fail",       "Датчик T_head: NaN"],
-  ["sensor_t_water_out_fail",  "Датчик T_water_out: NaN"],
-  ["sensor_noise",             "Шум датчиков ±0.5°C"],
-  ["valve_takeoff_stuck_open", "Клапан узла отбора: stuck OPEN"],
-  ["valve_takeoff_stuck_closed","Клапан узла отбора: stuck CLOSED"],
-  ["ssr_heater_stuck_on",      "SSR ТЭНа: пробой (PZEM ловит mismatch)"],
-  ["water_cutoff",             "Кран воды закрыт (нет потока)"],
-  ["estop_pressed",            "E-stop нажат"],
-  ["bimetal_tripped",          "Биметалл сработал"],
-  ["pi_disconnected",          "Pi отключен (watchdog test)"],
-  ["pressure_drift",           "Дрейф атм. давления (±10 hPa)"],
-];
+let ws = null;
+let lastSnap = null;
+let charts = {};
 
-const $ = id => document.getElementById(id);
-
-function fmtT(t) {
-  if (t === null || t === undefined || Number.isNaN(t)) return "—";
-  const h = Math.floor(t / 3600);
-  const m = Math.floor((t % 3600) / 60);
-  const s = Math.floor(t % 60);
-  return `${h}:${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}`;
-}
-
-function fmtN(v, prec=1) {
-  if (v === null || v === undefined || Number.isNaN(v)) return "—";
-  return (+v).toFixed(prec);
-}
-
-// Build fault toggles
-const faultsDiv = $("faults");
-FAULT_KEYS.forEach(([key, label]) => {
-  const div = document.createElement("div");
-  div.className = "fault-toggle";
-  div.dataset.key = key;
-  div.innerHTML = `<span>${label}</span><span class="state">off</span>`;
-  div.addEventListener("click", () => toggleFault(key, !div.classList.contains("active")));
-  faultsDiv.appendChild(div);
-});
-
-async function toggleFault(key, value) {
-  await fetch("/api/fault", {
-    method: "POST", headers: {"Content-Type": "application/json"},
-    body: JSON.stringify({ key, value })
-  });
-}
-
-async function startSession() {
-  const body = {
-    mode: $("mode").value,
-    V_kub: +$("v-init").value,
-    x_kub_abv: +$("x-init").value,
-    p_work: +$("pwork").value,
-    duty_heads: +$("duty-heads").value,
-    duty_body: +$("duty-body").value,
-    duty_tails: +$("duty-tails").value,
-    t_stable_s: +$("t-stable").value,
+function initCharts() {
+  const opts = {
+    responsive: true, maintainAspectRatio: false, animation: false,
+    plugins: { legend: { labels: { color: '#94a3b8', font: { size: 10 } } } },
+    scales: {
+      x: { ticks: { color: '#94a3b8', font: { size: 9 } }, grid: { color: '#334155' } },
+      y: { ticks: { color: '#94a3b8', font: { size: 9 } }, grid: { color: '#334155' } },
+    },
   };
-  await fetch("/api/start", {
-    method: "POST", headers: {"Content-Type": "application/json"},
-    body: JSON.stringify(body)
+  charts.T = new Chart(document.getElementById('chart-T'), {
+    type: 'line', data: { datasets: [
+      { label: 'T_kub', data: [], borderColor: '#ef4444', borderWidth: 1.5, pointRadius: 0 },
+      { label: 'T_head', data: [], borderColor: '#f97316', borderWidth: 1.5, pointRadius: 0 },
+      { label: 'T_water_out', data: [], borderColor: '#3b82f6', borderWidth: 1.5, pointRadius: 0 },
+    ]},
+    options: opts,
+  });
+  charts.P = new Chart(document.getElementById('chart-P'), {
+    type: 'line', data: { datasets: [
+      { label: 'P_heater kW', data: [], borderColor: '#eab308', borderWidth: 1.5, pointRadius: 0 },
+    ]},
+    options: opts,
+  });
+  charts.V = new Chart(document.getElementById('chart-V'), {
+    type: 'line', data: { datasets: [
+      { label: 'V_body L', data: [], borderColor: '#22c55e', borderWidth: 1.5, pointRadius: 0 },
+      { label: 'V_heads L', data: [], borderColor: '#f97316', borderWidth: 1.5, pointRadius: 0 },
+    ]},
+    options: opts,
+  });
+  charts.HW = new Chart(document.getElementById('chart-HW'), {
+    type: 'line', data: { datasets: [
+      { label: 'SSR T_j', data: [], borderColor: '#a855f7', borderWidth: 1.5, pointRadius: 0 },
+      { label: 'Valve Cv ×', data: [], borderColor: '#14b8a6', borderWidth: 1.5, pointRadius: 0, yAxisID: 'y1' },
+    ]},
+    options: { ...opts, scales: {
+      x: opts.scales.x,
+      y: { ...opts.scales.y, position: 'left' },
+      y1: { ...opts.scales.y, position: 'right', grid: { drawOnChartArea: false } },
+    }},
   });
 }
-$("btn-start").addEventListener("click", startSession);
-$("btn-stop").addEventListener("click", () => fetch("/api/stop", {method: "POST"}));
-$("btn-pause").addEventListener("click", () => fetch("/api/pause", {method: "POST"}));
-$("btn-reset").addEventListener("click", () => fetch("/api/reset", {method: "POST"}));
-$("btn-ack").addEventListener("click", () => fetch("/api/ack", {method: "POST"}));
 
-document.querySelectorAll(".speed-buttons button").forEach(btn => {
-  btn.addEventListener("click", async () => {
-    const speed = +btn.dataset.speed;
-    await fetch("/api/speed", {
-      method: "POST", headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({ speed })
-    });
-    document.querySelectorAll(".speed-buttons button").forEach(b => b.classList.remove("active"));
-    btn.classList.add("active");
-  });
-});
-
-// === Chart ===
-const ctx = $("chart").getContext("2d");
-function drawChart(history) {
-  const W = ctx.canvas.width, H = ctx.canvas.height;
-  ctx.clearRect(0, 0, W, H);
-  if (!history.length) return;
-  const padL = 40, padR = 10, padT = 10, padB = 20;
-  const w = W - padL - padR, h = H - padT - padB;
-
-  const t0 = history[0].t, t1 = history[history.length - 1].t;
-  const tspan = Math.max(1, t1 - t0);
-  let ymin = 10, ymax = 105;
-
-  // axes
-  ctx.strokeStyle = "#cbd5e1"; ctx.lineWidth = 1;
-  ctx.beginPath();
-  ctx.moveTo(padL, padT); ctx.lineTo(padL, padT + h); ctx.lineTo(padL + w, padT + h);
-  ctx.stroke();
-  // y ticks
-  ctx.fillStyle = "#94a3b8"; ctx.font = "10px monospace";
-  for (let v = 20; v <= 100; v += 20) {
-    const y = padT + h - ((v - ymin) / (ymax - ymin)) * h;
-    ctx.fillText(String(v), 8, y + 3);
-    ctx.strokeStyle = "#e2e8f0";
-    ctx.beginPath(); ctx.moveTo(padL, y); ctx.lineTo(padL + w, y); ctx.stroke();
-  }
-  // x ticks (every N minutes)
-  ctx.fillStyle = "#94a3b8";
-  ctx.fillText(fmtT(t0), padL, H - 4);
-  ctx.fillText(fmtT(t1), padL + w - 50, H - 4);
-
-  function line(key, color) {
-    ctx.strokeStyle = color; ctx.lineWidth = 2; ctx.beginPath();
-    history.forEach((p, i) => {
-      const x = padL + ((p.t - t0) / tspan) * w;
-      const y = padT + h - Math.max(0, Math.min(1, (p[key] - ymin) / (ymax - ymin))) * h;
-      if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
-    });
-    ctx.stroke();
-  }
-  line("T_kub", "#dc2626");
-  line("T_head", "#ea580c");
-  line("T_water_out", "#2563eb");
+function num(v, decimals=1) {
+  if (v === null || v === undefined) return '—';
+  if (typeof v !== 'number') return v;
+  if (isNaN(v)) return 'NaN';
+  return v.toFixed(decimals);
+}
+function fmtTime(s) {
+  if (s < 60) return s.toFixed(0) + 's';
+  if (s < 3600) return (s/60).toFixed(1) + 'min';
+  return (s/3600).toFixed(1) + 'h';
 }
 
-// === WebSocket ===
-let ws;
-function connect() {
-  ws = new WebSocket(`ws://${location.host}/ws`);
-  ws.onopen = () => { $("conn").textContent = "● live"; $("conn").classList.add("alive"); };
-  ws.onclose = () => {
-    $("conn").textContent = "● disconnected";
-    $("conn").classList.remove("alive");
-    setTimeout(connect, 1000);
-  };
-  ws.onmessage = (ev) => render(JSON.parse(ev.data));
-}
-connect();
+function updateUI(s) {
+  if (!s) return;
+  lastSnap = s;
+  document.getElementById('t-sim').textContent = fmtTime(s.t_sim_s || 0);
+  const phase = (s.controller && s.controller.phase) || 'IDLE';
+  const pe = document.getElementById('phase-display');
+  pe.textContent = phase;
+  pe.className = 'phase-tag phase-' + phase;
 
-function setTemp(id, val, decimals=1) {
-  const card = $("tc-" + id);
-  const el = $("t-" + id);
-  if (val === null || Number.isNaN(val) || val === undefined) {
-    el.textContent = "SENSOR FAIL";
-    card.classList.add("nan");
-  } else {
-    el.textContent = fmtN(val, decimals);
-    card.classList.remove("nan");
-  }
-}
+  if (!s.ready) return;
 
-function setLed(id, on, badIfOff=false) {
-  const el = $("led-" + id);
-  el.classList.remove("on", "off-bad");
-  if (on) el.classList.add("on");
-  else if (badIfOff) el.classList.add("off-bad");
-}
+  // Sensors
+  const p = s.physical;
+  document.getElementById('s-T_kub').textContent = num(p.T_kub) + ' °C';
+  document.getElementById('s-T_head').textContent = num(p.T_head) + ' °C';
+  document.getElementById('s-T_water_in').textContent = num(p.T_water_in) + ' °C';
+  document.getElementById('s-T_water_out').textContent = num(p.T_water_out) + ' °C';
+  document.getElementById('s-P_kW').textContent = num(p.P_heater_kW, 2) + ' kW';
+  document.getElementById('s-P_atm').textContent = num(p.P_atm_hPa, 0) + ' hPa';
+  document.getElementById('s-m_dot').textContent = num(p.m_dot_vapor_gps, 2) + ' g/s';
 
-function render(d) {
-  $("time-pill").textContent = "t = " + fmtT(d.t_sim_s);
-  $("speed-pill").textContent = `×${d.speed}`;
-  $("pi-status").textContent = "Pi: " + (d.pi_alive ? "ok" : "DOWN");
-  $("pi-status").className = "pill " + (d.pi_alive ? "alive" : "dead");
+  // Kub
+  document.getElementById('kub-V').textContent = num(p.V_kub_L, 2) + ' L';
+  document.getElementById('kub-ABV').textContent = num(p.x_kub_abv, 1) + ' %';
+  document.getElementById('kub-boil').textContent = p.is_boiling ? '✓ кипит' : '—';
+  const tags = [];
+  if (p.flooded) tags.push('<span class="badge err">flooded</span>');
+  if (p.weeping) tags.push('<span class="badge warn">weeping</span>');
+  if (p.dry_out) tags.push('<span class="badge err">dry-out</span>');
+  if (p.foam) tags.push('<span class="badge warn">foam</span>');
+  document.getElementById('kub-tags').innerHTML = tags.join(' ');
 
-  // Phase
-  const ph = d.controller.phase;
-  const tag = $("phase");
-  tag.textContent = ph;
-  tag.dataset.p = ph;
-  $("phase-elapsed").textContent = fmtT(d.controller.phase_elapsed_s);
-  $("session-elapsed").textContent = fmtT(d.controller.session_elapsed_s);
+  // Phase progress + outputs
+  const c = s.controller;
+  document.getElementById('phase-elapsed').textContent = fmtTime(c.phase_elapsed_s);
+  const out = s.outputs;
+  document.getElementById('heater-pct').textContent = out.heater_pct;
+  document.getElementById('heater-bar').style.width = out.heater_pct + '%';
+  document.getElementById('vt-led').className = 'led ' + (out.valve_takeoff ? 'on' : '');
+  document.getElementById('vt-state').textContent = out.valve_takeoff ? 'OPEN' : 'closed';
+  document.getElementById('vw-led').className = 'led ' + (out.valve_water ? 'on' : '');
+  document.getElementById('vw-state').textContent = out.valve_water ? 'OPEN' : 'closed';
+  document.getElementById('ct-led').className = 'led ' + (out.contactor ? 'on' : '');
+  document.getElementById('ct-state').textContent = out.contactor ? 'ON' : 'off';
 
-  // Temperatures (use sensor values which respect fault injection)
-  setTemp("kub", d.faults.sensor_t_kub_fail ? null : d.physical.T_kub);
-  setTemp("head", d.faults.sensor_t_head_fail ? null : d.physical.T_head);
-  setTemp("water-in", d.physical.T_water_in);
-  setTemp("water-out", d.faults.sensor_t_water_out_fail ? null : d.physical.T_water_out);
-  const dt = d.physical.T_water_out - d.physical.T_water_in;
-  $("t-water-sub").textContent = "ΔT " + (dt >= 0 ? "+" : "") + fmtN(dt, 1) + "°C";
-  $("t-kub-sub").textContent = d.physical.is_boiling ? "🫧 кипит" : "нагрев";
+  // Product
+  const pr = s.product;
+  document.getElementById('prod-active').textContent = pr.active;
+  document.getElementById('prod-heads').textContent = num(pr.V_heads_L, 3) + ' L';
+  document.getElementById('prod-body').textContent = num(pr.V_body_L, 2) + ' L';
+  document.getElementById('prod-tails').textContent = num(pr.V_tails_L, 2) + ' L';
+  document.getElementById('prod-x-head').textContent = num(pr.x_head_abv, 1) + ' %';
+  document.getElementById('prod-x-body').textContent = num(pr.x_product_abv, 1) + ' %';
 
-  // Outputs
-  const pct = (d.outputs.heater_power * 100);
-  $("power-fill").style.width = pct + "%";
-  $("power-lbl").textContent = `${fmtN(pct, 0)}% · ${fmtN(d.physical.P_heater_kW, 2)} kW`;
-  $("duty-fill").style.width = (d.physical.duty_avg * 100) + "%";
-  $("duty-val").textContent = fmtN(d.physical.duty_avg * 100, 1) + "%";
-
-  setLed("takeoff", d.outputs.valve_takeoff);
-  setLed("water", d.outputs.valve_water, /*badIfOff*/ d.controller.phase !== "IDLE" && d.controller.phase !== "DONE");
-  setLed("contactor", d.outputs.contactor_enable);
-
-  // Stats
-  $("v-kub").textContent = fmtN(d.physical.V_kub_L, 2) + " L";
-  $("x-kub").textContent = fmtN(d.physical.x_kub_abv, 1) + " %";
-  $("is-boiling").textContent = d.physical.is_boiling ? "да" : "нет";
-  $("p-atm").textContent = fmtN(d.physical.P_atm_hPa, 1) + " hPa";
-  $("m-vapor").textContent = fmtN(d.physical.m_dot_vapor_gps, 2) + " g/s";
-  $("v-prod").textContent = fmtN(d.physical.V_product_L, 3) + " L";
-  $("x-prod").textContent = fmtN(d.physical.x_product_abv, 1) + " об.%";
-  $("x-head").textContent = fmtN(d.physical.x_head_abv, 1) + " об.%";
-  $("p-vapor").textContent = fmtN(d.physical.P_to_vapor_kW, 2) + " kW";
-
-  // Faults UI sync
-  document.querySelectorAll(".fault-toggle").forEach(div => {
-    const k = div.dataset.key;
-    const active = d.faults[k];
-    div.classList.toggle("active", !!active);
-    div.querySelector(".state").textContent = active ? "ON" : "off";
-  });
+  // Hardware
+  const h = s.hardware;
+  document.getElementById('hw-ssr-T_j').textContent = h.ssr_T_j != null ? num(h.ssr_T_j) + ' °C' : 'off';
+  document.getElementById('hw-ssr-short').innerHTML = h.ssr_fail_short ? '<span class="badge err">SHORT</span>' : '—';
+  document.getElementById('hw-valve-Cv').textContent = h.valve_Cv != null ? num(h.valve_Cv, 2) : '—';
+  document.getElementById('hw-valve-T_coil').textContent = h.valve_T_coil != null ? num(h.valve_T_coil) + ' °C' : '—';
+  document.getElementById('hw-valve-stiction').textContent = h.valve_stiction != null ? num(h.valve_stiction, 2) + ' N' : '—';
+  document.getElementById('hw-ct-wear').textContent = h.contactor_wear != null ? num(h.contactor_wear, 3) : '—';
+  document.getElementById('hw-suspect').innerHTML = h.suspect_sensor
+    ? '<span class="badge err">' + h.suspect_sensor + '</span>' : '—';
+  document.getElementById('hw-ds-head-crc').textContent = h.ds_T_head_crc != null ? h.ds_T_head_crc : '—';
+  document.getElementById('hw-ds-kub-crc').textContent = h.ds_T_kub_crc != null ? h.ds_T_kub_crc : '—';
 
   // Alerts
-  const alerts = d.controller.alerts || [];
-  $("alerts").innerHTML = alerts.slice().reverse().map(a => {
-    let cls = "alert";
-    if (a.includes("EMERGENCY")) cls += " crit";
-    else if (a.includes("warn")) cls += " warn";
-    return `<div class="${cls}">${a}</div>`;
-  }).join("") || "—";
+  document.getElementById('n-alerts').textContent = c.n_alerts || 0;
+  document.getElementById('alerts-list').innerHTML = (c.alerts || []).slice().reverse()
+    .map(a => '<div class="alert">' + a + '</div>').join('');
 
-  // Chart
-  drawChart(d.history || []);
+  // Charts (history-driven)
+  if (s.history && s.history.length) {
+    const labels = s.history.map(h => fmtTime(h.t));
+    charts.T.data.labels = labels;
+    charts.T.data.datasets[0].data = s.history.map(h => h.T_kub);
+    charts.T.data.datasets[1].data = s.history.map(h => h.T_head);
+    charts.T.data.datasets[2].data = s.history.map(h => h.T_water_out);
+    charts.T.update('none');
+
+    charts.P.data.labels = labels;
+    charts.P.data.datasets[0].data = s.history.map(h => h.P_kW);
+    charts.P.update('none');
+
+    charts.V.data.labels = labels;
+    charts.V.data.datasets[0].data = s.history.map(h => h.V_body_L);
+    charts.V.data.datasets[1].data = s.history.map(h => h.V_heads_L);
+    charts.V.update('none');
+
+    charts.HW.data.labels = labels;
+    charts.HW.data.datasets[0].data = s.history.map(h => h.ssr_T_j);
+    charts.HW.data.datasets[1].data = s.history.map(h => h.valve_Cv_ratio);
+    charts.HW.update('none');
+  }
+
+  // Pause button label
+  document.getElementById('btn-pause').textContent = s.paused ? '▶ Resume' : '⏸ Pause';
+
+  // Speed buttons
+  document.querySelectorAll('.speed-bar button').forEach(b => {
+    b.classList.toggle('active',
+      (s.speed === 'max' && b.dataset.speed === 'max') ||
+      (typeof s.speed === 'number' && parseFloat(b.dataset.speed) === s.speed));
+  });
 }
+
+async function api(path, body) {
+  try {
+    const r = await fetch(path, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body || {}),
+    });
+    return await r.json();
+  } catch (e) {
+    console.error(e);
+    return { ok: false, error: String(e) };
+  }
+}
+
+function connectWS() {
+  const url = (location.protocol === 'https:' ? 'wss://' : 'ws://')
+    + location.host + '/ws';
+  ws = new WebSocket(url);
+  ws.onopen = () => { document.getElementById('ws-state').textContent = 'OK'; };
+  ws.onmessage = e => {
+    const snap = JSON.parse(e.data);
+    updateUI(snap);
+  };
+  ws.onclose = () => {
+    document.getElementById('ws-state').textContent = 'lost';
+    setTimeout(connectWS, 2000);
+  };
+}
+
+// Wire UI
+document.getElementById('btn-start').onclick = async () => {
+  const hwEnabled = document.getElementById('hw_enabled').checked;
+  const body = {
+    mode: document.getElementById('mode').value,
+    V_kub: +document.getElementById('V_kub').value,
+    x_kub_abv: +document.getElementById('x_kub_abv').value,
+    mash_type: document.getElementById('mash_type').value,
+    viscosity: +document.getElementById('viscosity').value,
+    sugar_g_L: +document.getElementById('sugar_g_L').value,
+    oborotniy_V_L: +document.getElementById('oborotniy_V_L').value,
+    oborotniy_abv: +document.getElementById('oborotniy_abv').value,
+  };
+  if (hwEnabled) {
+    body.hw = {
+      ds_family_T_head: document.getElementById('ds_T_head').value,
+      ds_family_T_kub: document.getElementById('ds_T_kub').value,
+      ssr_genuine: document.getElementById('ssr_genuine').checked,
+      V_mains: +document.getElementById('V_mains').value,
+      valve_takeoff_class: document.getElementById('valve_class').value,
+    };
+  }
+  await api('/api/start', body);
+};
+
+document.getElementById('btn-pause').onclick = () => api('/api/pause');
+document.getElementById('btn-ack').onclick = () => api('/api/ack');
+document.getElementById('btn-reset').onclick = () => api('/api/reset');
+
+document.querySelectorAll('.speed-bar button').forEach(b => {
+  b.onclick = () => api('/api/speed', { speed: b.dataset.speed === 'max' ? 'max' : +b.dataset.speed });
+});
+
+document.querySelectorAll('button[data-fault]').forEach(b => {
+  b.onclick = () => api('/api/fault', {
+    key: b.dataset.fault,
+    value: b.dataset.val ? +b.dataset.val : true,
+  });
+});
+
+document.getElementById('hw_enabled').onchange = e => {
+  document.getElementById('hw_panel').style.display = e.target.checked ? 'block' : 'none';
+};
+
+initCharts();
+connectWS();
 </script>
 </body>
 </html>

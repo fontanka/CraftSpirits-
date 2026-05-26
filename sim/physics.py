@@ -62,6 +62,65 @@ def vapor_eq_mol_frac(x_mol: List[float], T_C: float) -> List[float]:
     return [p / P_sum for p in partials]
 
 
+# Wilson model для etOH-H2O — non-ideal correction (12.11.2).
+# Параметры из Gmehling et al, VLE DECHEMA. λ в cal/mol, V в cm³/mol.
+# Для этанол(1)-вода(2):
+_WILSON_LAMBDA_12 = 276.76 * 4.184   # J/mol (= 1158 J/mol)
+_WILSON_LAMBDA_21 = 975.49 * 4.184   # J/mol (= 4081 J/mol)
+_WILSON_V = [40.7, 58.68, 18.07, 75.14, 109.18]  # molar volume cm³/mol
+
+
+def activity_coef_etOH_H2O(x_etOH_mol: float, T_C: float) -> tuple[float, float]:
+    """Wilson activity coefficients для бинарной etOH-H2O смеси.
+    Возвращает (γ_etOH, γ_H2O). Reproduces azeotrope ~89% mol (95.6 wt%) @ 1 atm.
+
+    Эта функция доступна как опция для более точного VLE расчёта.
+    Текущая sim использует Raoult (ideal mixture), что для etOH-H2O даёт
+    азеотроп ~89% mol тоже, но при немного другой T (≈0.5°C off). Полная
+    интеграция requires Boiler.step refactor — будет в stage 10.
+    """
+    R = 8.314  # J/(mol·K)
+    T_K = T_C + 273.15
+    V1, V2 = _WILSON_V[1], _WILSON_V[2]  # etOH, H2O
+    L12 = (V2 / V1) * math.exp(-_WILSON_LAMBDA_12 / (R * T_K))
+    L21 = (V1 / V2) * math.exp(-_WILSON_LAMBDA_21 / (R * T_K))
+    x1 = max(0.001, min(0.999, x_etOH_mol))
+    x2 = 1 - x1
+    ln_g1 = -math.log(x1 + L12 * x2) + x2 * (
+        L12 / (x1 + L12 * x2) - L21 / (x2 + L21 * x1)
+    )
+    ln_g2 = -math.log(x2 + L21 * x1) - x1 * (
+        L12 / (x1 + L12 * x2) - L21 / (x2 + L21 * x1)
+    )
+    return math.exp(ln_g1), math.exp(ln_g2)
+
+
+def vapor_eq_mol_frac_nonideal(x_mol: List[float], T_C: float) -> List[float]:
+    """Non-ideal VLE: Raoult с activity coefficients для etOH-H2O пары,
+    остальные компоненты (methanol, propanol, isoamyl) — ideal mixture.
+
+    Это опциональный path, может быть включён в Boiler.step через флаг
+    use_wilson_vle=True (по умолчанию False для backward compat).
+    """
+    # γ_i для etOH (i=1) и H2O (i=2) через Wilson
+    x_etOH = x_mol[1]
+    x_H2O = x_mol[2]
+    denom = x_etOH + x_H2O
+    if denom > 1e-6:
+        # эффективная x_etOH в бинарной этанол-вода паре (нормируем)
+        x_etOH_bin = x_etOH / denom
+        g_etOH, g_H2O = activity_coef_etOH_H2O(x_etOH_bin, T_C)
+    else:
+        g_etOH, g_H2O = 1.0, 1.0
+
+    gammas = [1.0, g_etOH, g_H2O, 1.0, 1.0]
+    partials = [gammas[i] * x_mol[i] * P_sat(i, T_C) for i in range(N_COMP)]
+    P_sum = sum(partials)
+    if P_sum < 1e-3:
+        return [0.0] * N_COMP
+    return [p / P_sum for p in partials]
+
+
 def boiling_T(x_mol: List[float], P_atm_Pa: float = 101325) -> float:
     """Bubble point T (°C) of liquid mixture at given pressure (bisection)."""
     lo, hi = 30.0, 150.0

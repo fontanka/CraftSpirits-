@@ -459,6 +459,85 @@ class SSR:
 
 
 # ============================================================================
+# PZEM-004T (energy meter, 1Hz update via Modbus RTU)
+# ============================================================================
+
+@dataclass
+class PZEMState:
+    """PZEM-004T published values (V, A, W, Wh, Hz, PF)."""
+    V_rms: float = 230.0
+    I_rms: float = 0.0
+    P_W: float = 0.0
+    energy_Wh: float = 0.0
+    Hz: float = 50.0
+    PF: float = 0.95
+    crc_error: bool = False
+    stuck_last_value: bool = False
+    last_published_W: float = 0.0
+
+
+class PZEM:
+    """PZEM-004T: 1Hz Modbus update. Используется как ground-truth power
+    measurement — controller сверяет с commanded heater duty (см. 12.13.8 +
+    'SSR пробой' detection).
+
+    Failure modes:
+    - CRC error (длинный кабель, EMI) → controller должен retry
+    - Stuck value (firmware bug на counterfeit) → replays last reading
+    - Update lag — 1Hz цикл независимо от sim dt
+    """
+
+    UPDATE_INTERVAL_S = 1.0  # PZEM физически обновляется раз в секунду
+
+    def __init__(self, crc_error_p_per_read: float = 0.001):
+        self.s = PZEMState()
+        self.crc_error_p = crc_error_p_per_read
+        self._last_update_t: float = -10.0
+        self._buffered_W: float = 0.0
+        self._buffered_I: float = 0.0
+        self._buffered_V: float = 230.0
+
+    def step(self, dt: float, t_sim: float, instantaneous_P_W: float,
+             V_mains: float = 230.0):
+        """Внутренний учёт энергии (continuous integration over dt)."""
+        self.s.energy_Wh += instantaneous_P_W * dt / 3600
+        self._buffered_W = instantaneous_P_W
+        self._buffered_V = V_mains
+        self._buffered_I = instantaneous_P_W / max(V_mains, 1)
+
+    def read(self, t_sim: float) -> dict | None:
+        """Контроллер вызывает раз в Nms. Возвращает dict или None если PZEM
+        ещё не обновился с прошлого опроса (1Hz limit) или CRC error."""
+        if t_sim - self._last_update_t < self.UPDATE_INTERVAL_S:
+            return None
+        self._last_update_t = t_sim
+
+        if random.random() < self.crc_error_p:
+            self.s.crc_error = True
+            return None
+
+        self.s.crc_error = False
+
+        if self.s.stuck_last_value:
+            return {
+                "V_rms": self.s.V_rms, "I_rms": self.s.I_rms,
+                "P_W": self.s.last_published_W,
+                "energy_Wh": self.s.energy_Wh,
+                "Hz": self.s.Hz, "PF": self.s.PF,
+            }
+
+        self.s.V_rms = self._buffered_V
+        self.s.I_rms = self._buffered_I
+        self.s.P_W = self._buffered_W
+        self.s.last_published_W = self._buffered_W
+        return {
+            "V_rms": self.s.V_rms, "I_rms": self.s.I_rms,
+            "P_W": self.s.P_W, "energy_Wh": self.s.energy_Wh,
+            "Hz": self.s.Hz, "PF": self.s.PF,
+        }
+
+
+# ============================================================================
 # CONTACTOR (coil chatter при low V)
 # ============================================================================
 
