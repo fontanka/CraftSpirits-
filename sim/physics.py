@@ -700,6 +700,56 @@ class Still:
         self.contactor_enable = False
         # Pressure (with optional drift)
         self.P_atm_Pa_base = 101325.0
+        # Hardware models (off by default — backward-compat с existing tests)
+        self.realistic_hw_enabled = False
+        self.ds18b20_T_kub = None
+        self.ds18b20_T_kub_wall = None
+        self.ds18b20_T_head = None
+        self.ds18b20_T_water_in = None
+        self.ds18b20_T_water_out = None
+        self.ssr_heater = None
+        self.valve_takeoff_hw = None
+        self.valve_water_hw = None
+        self.contactor_hw = None
+        self._last_ssr_switching = False  # передаётся в DS18B20.read как EMI flag
+        self.V_mains = 230.0  # для contactor + valve coil V_supply
+
+    def enable_realistic_hardware(self,
+                                   ds_family_T_kub=None,
+                                   ds_family_T_head=None,
+                                   ds_family_T_water_in=None,
+                                   ds_family_T_water_out=None,
+                                   ds_family_T_kub_wall=None,
+                                   ssr_genuine: bool = True,
+                                   valve_takeoff_snubber: bool = True,
+                                   valve_water_snubber: bool = True,
+                                   valve_takeoff_class=None,
+                                   V_mains: float = 230.0):
+        """Включает hardware-level моделирование сенсоров и SSR.
+        Каждый ds_family_* — CounterfeitFamily enum (None = ORIGINAL).
+        Без вызова этого метода поведение Still неизменно — tests/scenarios
+        работающие с idealnym readout не ломаются."""
+        from hardware import (CoilClass, CounterfeitFamily, Contactor,
+                              DS18B20, SSR, Valve)
+        ORIG = CounterfeitFamily.ORIGINAL
+        self.ds18b20_T_kub = DS18B20("28-aa-01", ds_family_T_kub or ORIG)
+        self.ds18b20_T_kub_wall = DS18B20("28-aa-02", ds_family_T_kub_wall or ORIG)
+        self.ds18b20_T_head = DS18B20("28-aa-03", ds_family_T_head or ORIG)
+        self.ds18b20_T_water_in = DS18B20("28-aa-04", ds_family_T_water_in or ORIG)
+        self.ds18b20_T_water_out = DS18B20("28-aa-05", ds_family_T_water_out or ORIG)
+        self.ssr_heater = SSR(is_genuine=ssr_genuine, snubber=True)
+        self.valve_takeoff_hw = Valve(
+            coil_class=valve_takeoff_class or CoilClass.B,
+            snubber=valve_takeoff_snubber,
+        )
+        self.valve_water_hw = Valve(
+            coil_class=CoilClass.B,
+            snubber=valve_water_snubber,
+        )
+        self.contactor_hw = Contactor()
+        self.V_mains = V_mains
+        self.realistic_hw_enabled = True
+        return self
 
     def set_initial(self, V_L: float = 18, abv_vol: float = 12,
                     viscosity: float = 1.0, sugar_g_L: float = 0,
@@ -765,7 +815,31 @@ class Still:
             P_atm += 1000 * math.sin(self.t_sim_s / 7200)
 
         # Heater power: gated by contactor; SSR stuck-on handled in hardware.py
-        P_W = self.heater_power * self.boiler.p.P_max_kW * 1000 if self.contactor_enable else 0
+        # Realistic hw path: route через SSR + contactor models с реальным V_mains.
+        if self.realistic_hw_enabled:
+            self.contactor_hw.step(dt, cmd_enable=self.contactor_enable,
+                                   V_coil=self.V_mains)
+            contactor_holds = self.contactor_hw.s.enabled
+            cmd_on = self.heater_power > 0.5  # на этом уровне sim PWM-pattern
+            P_full_W = self.boiler.p.P_max_kW * 1000
+            I_full = P_full_W / max(self.V_mains, 1)
+            I_load = I_full * self.heater_power  # average current
+            flows, switching = self.ssr_heater.step(
+                dt, cmd_on=cmd_on and contactor_holds,
+                I_load_A=I_load, T_ambient_C=25,
+            )
+            P_W = self.heater_power * P_full_W if flows else 0
+            self._last_ssr_switching = switching
+            # Valve hardware step (informational + Cv drift, leak tracking)
+            self.valve_takeoff_hw.s.V_supply = self.V_mains
+            self.valve_water_hw.s.V_supply = self.V_mains
+            self.valve_takeoff_hw.step(dt, self.t_sim_s,
+                                       cmd_open=self.valve_takeoff_open)
+            self.valve_water_hw.step(dt, self.t_sim_s,
+                                     cmd_open=self.valve_water_open)
+        else:
+            P_W = self.heater_power * self.boiler.p.P_max_kW * 1000 if self.contactor_enable else 0
+            self._last_ssr_switching = False
 
         # Cooling water inlet T (with optional hot day disturbance)
         T_water_in = self.faults.cooling_water_hot if self.faults.cooling_water_hot is not None else 12.0
@@ -941,15 +1015,30 @@ class Still:
         self.contactor_enable = outs.contactor_enable
 
     def read_sensors(self) -> dict:
-        """То, что 'ESP читает с DS18B20'. Sensor-level fault injection
-        будет в hardware.py; здесь — идеальный читатель из физики."""
+        """То, что 'ESP читает с DS18B20'. С enable_realistic_hardware()
+        — пропускаем через DS18B20 модели (sentinels, noise, drift, CRC fails
+        кластеризованные около SSR switching events)."""
         o = self.observables()
+        if self.realistic_hw_enabled:
+            ssr_sw = self._last_ssr_switching
+            dt_hint = 1.0  # not strictly tied to step dt; for drift accumulation
+            t_kub = self.ds18b20_T_kub.read(dt_hint, self.t_sim_s, o.T_kub_bulk_C, ssr_sw)
+            t_kub_wall = self.ds18b20_T_kub_wall.read(dt_hint, self.t_sim_s, o.T_kub_wall_C, ssr_sw)
+            t_head = self.ds18b20_T_head.read(dt_hint, self.t_sim_s, o.T_head_C, ssr_sw)
+            t_water_in = self.ds18b20_T_water_in.read(dt_hint, self.t_sim_s, o.T_water_in_C, ssr_sw)
+            t_water_out = self.ds18b20_T_water_out.read(dt_hint, self.t_sim_s, o.T_water_out_C, ssr_sw)
+        else:
+            t_kub = o.T_kub_bulk_C
+            t_kub_wall = o.T_kub_wall_C
+            t_head = o.T_head_C
+            t_water_in = o.T_water_in_C
+            t_water_out = o.T_water_out_C
         return {
-            "T_kub": o.T_kub_bulk_C,
-            "T_kub_wall": o.T_kub_wall_C,
-            "T_head": o.T_head_C,
-            "T_water_in": o.T_water_in_C,
-            "T_water_out": o.T_water_out_C,
+            "T_kub": t_kub,
+            "T_kub_wall": t_kub_wall,
+            "T_head": t_head,
+            "T_water_in": t_water_in,
+            "T_water_out": t_water_out,
             "P_atm_hPa": o.P_atm_hPa,
             "is_boiling": o.is_boiling,
             "V_kub": o.V_kub_L,
@@ -975,4 +1064,15 @@ class Still:
             "V_heads_L": o.V_heads_L,
             "V_body_L": o.V_body_L,
             "active_receiver": o.active_receiver,
+            # Hardware diagnostics (только если включено)
+            "ssr_T_junction_C": self.ssr_heater.s.T_junction_C if self.realistic_hw_enabled else None,
+            "ssr_fail_short": self.ssr_heater.s.fail_short if self.realistic_hw_enabled else None,
+            "valve_takeoff_Cv": self.valve_takeoff_hw.s.Cv_effective if self.realistic_hw_enabled else None,
+            "valve_takeoff_T_coil": self.valve_takeoff_hw.s.T_coil_C if self.realistic_hw_enabled else None,
+            "valve_takeoff_stiction_N": self.valve_takeoff_hw.s.stiction_force_N if self.realistic_hw_enabled else None,
+            "contactor_chatter": self.contactor_hw.s.chatter if self.realistic_hw_enabled else None,
+            "contactor_wear": self.contactor_hw.s.contact_wear if self.realistic_hw_enabled else None,
+            "ds_T_head_crc_fails": self.ds18b20_T_head.s.crc_fail_count if self.realistic_hw_enabled else None,
+            "ds_T_head_sentinels": self.ds18b20_T_head.s.sentinel_count if self.realistic_hw_enabled else None,
+            "ds_T_kub_sentinels": self.ds18b20_T_kub.s.sentinel_count if self.realistic_hw_enabled else None,
         }
