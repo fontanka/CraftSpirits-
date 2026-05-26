@@ -54,6 +54,11 @@ class SimEngine:
             "viscosity": 1.0, "sugar_g_L": 0.0,
             "oborotniy_V_L": 0.0, "oborotniy_abv": 0.0,
             "column_D_m": 0.040,
+            # Stage 10: configurable hardware
+            "heater_kW": 5.0,        # 1.5 для ХД-4 500 setup
+            "column_type": "packed", # 'packed' | 'bubble_cap'
+            "n_plates": 4,           # для bubble_cap
+            "column_H_m": 1.0,       # 0.5 для ХД-4 500
         }
         self._hw_opts: dict = {}
         self._recipe = Recipe()
@@ -71,7 +76,13 @@ class SimEngine:
 
     def new_session(self, mode: str = "REFLUX"):
         """Создать новый Still + Controller с текущим _cfg и _hw_opts."""
-        self.still = Still(column_diameter_m=self._cfg["column_D_m"])
+        self.still = Still(
+            column_diameter_m=self._cfg["column_D_m"],
+            heater_kW=self._cfg.get("heater_kW", 5.0),
+            column_type=self._cfg.get("column_type", "packed"),
+            n_plates=int(self._cfg.get("n_plates", 4)),
+            column_H_m=self._cfg.get("column_H_m", 1.0),
+        )
         self.still.set_initial(
             V_L=self._cfg["V_kub"],
             abv_vol=self._cfg["x_kub_abv"],
@@ -99,6 +110,9 @@ class SimEngine:
             self.still.enable_realistic_hardware(**kwargs)
 
         self._recipe = Recipe(mode=Mode(mode))
+        # Sync heater rating into Recipe so PZEM-style cmd-vs-meas check
+        # uses correct max power
+        self._recipe.heater_max_kW = self._cfg.get("heater_kW", 5.0)
         self.controller = Controller(self._recipe)
         self.controller.start(0.0, initial_sensors=self.still.read_sensors())
         self.history.clear()
@@ -171,6 +185,15 @@ class SimEngine:
                 "T_head": o.T_head_C,
                 "T_water_in": o.T_water_in_C,
                 "T_water_out": o.T_water_out_C,
+                "T_water_after_product": s.condenser.s.T_water_after_product_C,
+                "main_bypass_closed": s.condenser.s.main_bypass_closed,
+                "Q_main_W": s.condenser.s.Q_to_water_W,
+                "Q_product_W": s.condenser.s.Q_to_water_product_W,
+                "column_type": s.column.p.column_type,
+                "n_plates": s.column.p.n_plates,
+                "N_eff": s.column.s.N_eff,
+                "Cv": s.column.s.Cv,
+                "delta_P_Pa": s.column.s.delta_P_Pa,
                 "V_kub_L": o.V_kub_L,
                 "x_kub_abv": o.x_kub_abv,
                 "x_head_abv": o.x_head_abv,
@@ -279,6 +302,11 @@ class StartReq(BaseModel):
     oborotniy_V_L: float | None = None
     oborotniy_abv: float | None = None
     column_D_m: float | None = None
+    # Stage 10: hardware spec (ХД-4 500: heater_kW=1.5, bubble_cap, 4 plates, 0.5m)
+    heater_kW: float | None = None
+    column_type: str | None = None
+    n_plates: int | None = None
+    column_H_m: float | None = None
     hw: dict | None = None
 
 
@@ -381,6 +409,10 @@ async def inject_fault(req: FaultReq):
     elif k == "sensor_T_kub_disconnect":
         if engine.still.realistic_hw_enabled:
             engine.still.ds18b20_T_kub.disconnect()
+    elif k == "main_bypass":
+        # Stage 10: cut water flow to main reflux condenser
+        # (для ХД setup — bypass mode)
+        engine.still.condenser.s.main_bypass_closed = bool(v) if v is not None else True
     elif k == "clear":
         # Сбросить inject-able faults (не all — некоторые latch)
         f.water_cutoff = False

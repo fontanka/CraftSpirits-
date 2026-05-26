@@ -40,6 +40,11 @@ class Scenario:
     warm_start_confirmed: bool = False  # для hot-start сценариев
     max_after_done_s: int = 30  # сколько ticks крутить после DONE
     pre_heat_T_kub_C: float | None = None  # для hot-start: куб уже тёплый
+    # Stage 10: hardware spec (defaults match original 5kW packed 1m setup)
+    heater_kW: float = 5.0
+    column_type: str = "packed"
+    n_plates: int = 4
+    column_H_m: float = 1.0
 
 
 def run(scen: Scenario) -> tuple[bool, str, list[str]]:
@@ -47,7 +52,13 @@ def run(scen: Scenario) -> tuple[bool, str, list[str]]:
     # CRC fails, valve corrosion) делают тесты flaky без этого
     import random
     random.seed(42)
-    still = Still(column_diameter_m=scen.column_D_m)
+    still = Still(
+        column_diameter_m=scen.column_D_m,
+        heater_kW=scen.heater_kW,
+        column_type=scen.column_type,
+        n_plates=scen.n_plates,
+        column_H_m=scen.column_H_m,
+    )
     still.set_initial(V_L=scen.V_kub, abv_vol=scen.x_kub_abv,
                       viscosity=scen.viscosity, sugar_g_L=scen.sugar_g_L,
                       mash_type=scen.mash_type,
@@ -59,6 +70,8 @@ def run(scen: Scenario) -> tuple[bool, str, list[str]]:
         still.boiler.s.T_film_C = scen.pre_heat_T_kub_C
         still.boiler.s.T_walls_C = scen.pre_heat_T_kub_C
 
+    # Sync heater rating in recipe (stage 10)
+    scen.recipe.heater_max_kW = scen.heater_kW
     ctrl = Controller(scen.recipe)
     ctrl.start(0.0, initial_sensors=still.read_sensors(),
                warm_start_confirmed=scen.warm_start_confirmed)
@@ -1079,6 +1092,51 @@ def scen_hw_no_suspect_when_all_genuine():
     )
 
 
+def scen_xd4_500_baseline():
+    """ХД-4 500 setup: 1.5 kW heater, bubble cap 4 plates, 0.5m column,
+    18L grain. Должно медленно дойти до DONE — длиннее обычной session."""
+    return Scenario(
+        name="hw stage10: ХД-4 500 (1.5kW, bubble 4p, 0.5m) — session completes",
+        heater_kW=1.5,
+        column_type="bubble_cap",
+        n_plates=4,
+        column_H_m=0.5,
+        V_kub=15,
+        x_kub_abv=14,
+        mash_type="grain",
+        max_sim_s=12 * 3600,  # до 12ч — slow heatup at 1.5kW
+        check=lambda s, c: (
+            c.st.phase in (Phase.DONE, Phase.CLOSED, Phase.BODY, Phase.TAILS),
+            f"phase={c.st.phase.value} V_body={s.V_body_L:.2f}L "
+            f"Cv={s.column.s.Cv:.2f} N_eff={s.column.s.N_eff}",
+        ),
+    )
+
+
+def scen_xd4_main_bypass():
+    """ХД-4 500 + main condenser bypass через 30 мин — vapor breaks through
+    (не охлаждается), behaviour ближе к pot-still."""
+    def inject(s, c, t):
+        if t == 1800:  # @30 min
+            s.condenser.s.main_bypass_closed = True
+
+    return Scenario(
+        name="hw stage10: ХД-4 main bypass @30 min — vapor breakthrough",
+        heater_kW=1.5,
+        column_type="bubble_cap",
+        n_plates=4,
+        column_H_m=0.5,
+        V_kub=15,
+        x_kub_abv=14,
+        max_sim_s=8 * 3600,
+        inject=inject,
+        check=lambda s, c: (
+            s.condenser.s.main_bypass_closed,
+            f"phase={c.st.phase.value} main_bypass={s.condenser.s.main_bypass_closed}",
+        ),
+    )
+
+
 def scen_hw_cv_drift_does_not_break_run():
     """Sanity: даже когда Cv drift постоянно держится высоким (×1.5),
     session завершается DONE. Принудительно держим T_coil горячей через
@@ -1180,6 +1238,10 @@ SCENARIOS = [
     scen_hw_suspect_sensor_detected(),
     scen_hw_no_suspect_when_all_genuine(),
     scen_hw_cv_drift_does_not_break_run(),
+
+    # Stage 10: ХД-4 500 hardware setup (1.5kW + bubble cap + 2 condensers)
+    scen_xd4_500_baseline(),
+    scen_xd4_main_bypass(),
 ]
 
 

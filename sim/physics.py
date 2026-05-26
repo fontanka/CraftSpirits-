@@ -414,11 +414,17 @@ ALPHA_REL = {
 class ColumnParams:
     D_m: float = 0.04  # 1.5" inner ≈ 38mm; 2" ≈ 50mm
     H_m: float = 1.0
-    packing: str = "SPN"  # SPN, mesh, raschig
+    packing: str = "SPN"  # SPN, mesh, raschig — игнорируется при column_type='bubble_cap'
     epsilon: float = 0.92
     a_p: float = 1500
     total_holdup_kg: float = 0.25
     N_theoretical_max: int = 20  # максимум при идеальном Cv
+    # Тип колонны (stage 10):
+    # 'packed' — насадочная (SPN/mesh/raschig), packed bed
+    # 'bubble_cap' — колпачковая (e.g. ХД-4 500), N тарелок
+    column_type: str = "packed"
+    n_plates: int = 4  # для bubble_cap: фиксированное число тарелок
+    holdup_per_plate_L: float = 0.05  # bubble_cap: жидкость на каждой тарелке
 
 
 @dataclass
@@ -463,11 +469,27 @@ class Column:
 
     def v_flood_m_s(self) -> float:
         """Flooding vapor velocity. Calibrated against Sherwood-Eckert and forum data:
-        1.5" SPN @ 5kW → Cv ~ 0.75 (v=3.6 m/s, v_flood=4.8)."""
+        1.5" SPN @ 5kW → Cv ~ 0.75 (v=3.6 m/s, v_flood=4.8).
+        Bubble cap (медные колпачковые типа ХД-4): v_flood ~1.0-1.5 m/s,
+        существенно ниже packed из-за liquid hold-up на тарелках."""
+        if self.p.column_type == "bubble_cap":
+            return 1.2  # медная колпачковая
         return {"SPN": 4.8, "mesh": 3.5, "raschig": 4.0}.get(self.p.packing, 4.0)
 
     def HETP_from_Cv(self, Cv: float) -> float:
-        """HETP curve: optimum at Cv=0.5-0.7."""
+        """HETP curve: optimum at Cv=0.5-0.7. Для bubble cap каждая тарелка
+        — отдельный stage, HETP ≈ plate spacing (typically 100-125 mm), но
+        КПД тарелки 0.5-0.7 → эффективный HETP больше."""
+        if self.p.column_type == "bubble_cap":
+            # plate spacing ХД-4 500: 500mm / 4 plates = ~125mm per plate
+            # КПД тарелки ~0.6 → эффективный HETP = spacing / efficiency
+            base_HETP_cm = 100 * (self.p.H_m / max(1, self.p.n_plates)) / 0.6
+            if Cv < 0.2:
+                return base_HETP_cm * 2  # weeping, sieve effect
+            elif Cv < 0.85:
+                return base_HETP_cm
+            else:
+                return base_HETP_cm * 3  # near flooding
         if Cv < 0.2:
             return 20
         elif Cv < 0.3:
@@ -505,8 +527,15 @@ class Column:
         s.flooded = s.Cv > 1.0
         s.weeping = 0 < s.Cv < 0.3
         s.HETP_cm = self.HETP_from_Cv(s.Cv)
-        s.N_eff = max(3, int(p.H_m * 100 / s.HETP_cm))
-        s.delta_P_Pa = (200 + 800 * s.Cv) * (1 + 2 * s.Cv ** 2) * p.H_m
+        if p.column_type == "bubble_cap":
+            # N_eff = n_plates × КПД (efficiency drops при weeping/flooding)
+            eff = 0.6 if 0.3 < s.Cv < 0.85 else (0.3 if s.Cv < 0.3 else 0.4)
+            s.N_eff = max(1, int(p.n_plates * eff))
+            # ΔP per plate ~600-1500 Pa (зависит от Cv), всего n_plates тарелок
+            s.delta_P_Pa = (600 + 900 * s.Cv) * p.n_plates
+        else:
+            s.N_eff = max(3, int(p.H_m * 100 / s.HETP_cm))
+            s.delta_P_Pa = (200 + 800 * s.Cv) * (1 + 2 * s.Cv ** 2) * p.H_m
         s.pre_flood_oscillation = max(0, (s.Cv - 0.7) * 5)
 
         # 2. Если нет пара — top остывает медленно к ambient
@@ -609,16 +638,30 @@ class Column:
 @dataclass
 class CondenserState:
     T_water_in_C: float = 12.0
-    T_water_out_C: float = 12.0
-    water_flow_lpm: float = 3.0  # set manually by operator
+    T_water_out_C: float = 12.0  # после прохождения main reflux condenser
+    T_water_after_product_C: float = 12.0  # после product condenser (если в series)
+    water_flow_lpm: float = 3.0  # operator-set
     water_valve_open: bool = False
     # Cooling power balance
-    Q_to_water_W: float = 0
+    Q_to_water_W: float = 0           # main reflux condenser
+    Q_to_water_product_W: float = 0   # product condenser (если в series)
+    # Stage 10: main bypass (water пропускает основной reflux condenser)
+    main_bypass_closed: bool = False
+    # Stage 10: capacity ratings
+    main_capacity_kW: float = 2.0     # ХД setup: 2 kW reflux condenser
+    product_capacity_kW: float = 0.3  # малый product condenser, кулирует takeoff
 
 
 class Condenser:
     """Reflux condenser: полная конденсация всего пара пришедшего сверху.
-    Cooling water energy balance."""
+    Cooling water energy balance.
+
+    Stage 10 — поддерживает 2-condenser series: cooling water flow
+    [inlet] → product condenser → main reflux condenser → [drain]
+    Если main_bypass_closed=True (запорно-регулировочный вентиль перекрыт),
+    вода идёт только через product, а main не охлаждается → vapor не
+    конденсируется (potstill-like aufrise).
+    """
 
     CP_WATER = 4186.0
 
@@ -626,34 +669,73 @@ class Condenser:
         self.s = CondenserState()
 
     def step(self, dt: float, m_dot_vapor_kg_s: float, x_vapor_mass: List[float],
-             water_cutoff: bool = False):
+             water_cutoff: bool = False,
+             m_dot_product_kg_s: float = 0.0):
+        """Один шаг.
+        m_dot_vapor_kg_s — пар из колонны → main reflux condenser
+        m_dot_product_kg_s — отбор из takeoff → product condenser
+                              (для sub-cooling уже сконденсированного дистиллята)
+        """
         s = self.s
-        if m_dot_vapor_kg_s > 0:
+        # 1. Q absorbed by main reflux condenser (только когда water flows through)
+        if m_dot_vapor_kg_s > 0 and not s.main_bypass_closed:
             L_vap = latent_heat_mix(x_vapor_mass)
             s.Q_to_water_W = m_dot_vapor_kg_s * L_vap
+            # Cap by physical capacity rating
+            s.Q_to_water_W = min(s.Q_to_water_W, s.main_capacity_kW * 1000)
         else:
             s.Q_to_water_W = 0
 
+        # 2. Q absorbed by product condenser — sub-cool takeoff stream от ~78°C к 25°C
+        if m_dot_product_kg_s > 0:
+            cp_prod = cp_mix(x_vapor_mass)
+            dT_subcool = 78 - 25  # typical для product condenser
+            s.Q_to_water_product_W = m_dot_product_kg_s * cp_prod * dT_subcool
+            s.Q_to_water_product_W = min(
+                s.Q_to_water_product_W, s.product_capacity_kW * 1000
+            )
+        else:
+            s.Q_to_water_product_W = 0
+
+        # 3. Water loop energy balance
         if s.water_valve_open and not water_cutoff:
-            m_dot_w = s.water_flow_lpm / 60 * 1.0  # kg/s
+            m_dot_w = s.water_flow_lpm / 60 * 1.0  # kg/s (ρ_water ≈ 1)
             if m_dot_w > 1e-4:
-                target_dT = s.Q_to_water_W / (m_dot_w * self.CP_WATER)
-                target_out = s.T_water_in_C + target_dT
-                tau = 5.0
-                s.T_water_out_C += (target_out - s.T_water_out_C) * dt / tau
+                # Series flow: вода сначала через product condenser, потом main
+                dT_product = s.Q_to_water_product_W / (m_dot_w * self.CP_WATER)
+                target_after_product = s.T_water_in_C + dT_product
+                tau = 3.0
+                s.T_water_after_product_C += (
+                    target_after_product - s.T_water_after_product_C
+                ) * dt / tau
+
+                # Main condenser: входная вода = выход product
+                if s.main_bypass_closed:
+                    # Bypass: вода не идёт в main → main heating без отвода
+                    s.T_water_out_C = s.T_water_after_product_C
+                else:
+                    dT_main = s.Q_to_water_W / (m_dot_w * self.CP_WATER)
+                    target_main_out = s.T_water_after_product_C + dT_main
+                    s.T_water_out_C += (target_main_out - s.T_water_out_C) * dt / tau
             else:
-                # No flow, water heats rapidly
-                m_in_pipe = 0.3  # kg
-                s.T_water_out_C += s.Q_to_water_W * dt / (m_in_pipe * self.CP_WATER)
+                # No flow — water in pipe heats rapidly
+                m_in_pipe = 0.3
+                total_Q = s.Q_to_water_W + s.Q_to_water_product_W
+                s.T_water_out_C += total_Q * dt / (m_in_pipe * self.CP_WATER)
+                s.T_water_after_product_C += s.Q_to_water_product_W * dt / (m_in_pipe * self.CP_WATER)
         else:
             # No flow at all
             m_in_pipe = 0.3
-            s.T_water_out_C += s.Q_to_water_W * dt / (m_in_pipe * self.CP_WATER)
+            total_Q = s.Q_to_water_W + s.Q_to_water_product_W
+            s.T_water_out_C += total_Q * dt / (m_in_pipe * self.CP_WATER)
+            s.T_water_after_product_C += s.Q_to_water_product_W * dt / (m_in_pipe * self.CP_WATER)
 
-        # Approach equilibrium with input when no heat
-        if s.Q_to_water_W < 10:
+        # 4. Equilibrium decay when no heat
+        if s.Q_to_water_W < 10 and s.Q_to_water_product_W < 10:
             s.T_water_out_C += (s.T_water_in_C - s.T_water_out_C) * dt / 30
+            s.T_water_after_product_C += (s.T_water_in_C - s.T_water_after_product_C) * dt / 30
         s.T_water_out_C = min(s.T_water_out_C, 130)
+        s.T_water_after_product_C = min(s.T_water_after_product_C, 130)
 
 
 # ============================================================================
@@ -732,10 +814,25 @@ class Still:
     # 150 мл — типичное значение, можно настроить через self.heads_cup_volume_L.
     DEFAULT_HEADS_CUP_VOLUME_L: float = 0.150
 
-    def __init__(self, column_diameter_m: float = 0.04):
+    def __init__(self, column_diameter_m: float = 0.04,
+                 heater_kW: float = 5.0,
+                 column_type: str = "packed",
+                 n_plates: int = 4,
+                 column_H_m: float = 1.0):
+        """Конфигурируемый Still. По умолчанию: 1.5" packed ректификация
+        с 5 kW heater. Для ХД-4 500 типового сетапа:
+            Still(column_diameter_m=0.040, heater_kW=1.5,
+                  column_type='bubble_cap', n_plates=4, column_H_m=0.5)
+        """
         from hardware import LevelSensor
         self.boiler = Boiler()
-        col_params = ColumnParams(D_m=column_diameter_m)
+        self.boiler.p.P_max_kW = heater_kW
+        col_params = ColumnParams(
+            D_m=column_diameter_m,
+            H_m=column_H_m,
+            column_type=column_type,
+            n_plates=n_plates,
+        )
         self.column = Column(col_params)
         self.condenser = Condenser()
         self.faults = StillFaults()
@@ -920,7 +1017,11 @@ class Still:
                                        R_eff, P_atm, T_boil)
 
         # 3. Condenser step — all vapor condenses
-        self.condenser.step(dt, m_dot_vapor, y_top_mass, self.faults.water_cutoff)
+        # Product stream goes through small product condenser (если valve открыт)
+        m_dot_product = m_dot_vapor if self.valve_takeoff_open else 0.0
+        self.condenser.step(dt, m_dot_vapor, y_top_mass,
+                            self.faults.water_cutoff,
+                            m_dot_product_kg_s=m_dot_product)
 
         # 4. Узел отбора (LM): если клапан открыт, конденсат уходит в активный приёмник.
         # Механическое сифонное устройство переводит поток heads → body → tails

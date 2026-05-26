@@ -122,6 +122,9 @@ class Recipe:
     # PZEM-style: расхождение между заданной и измеренной мощностью
     power_mismatch_kW: float = 0.5  # порог |P_set - P_meas|
     power_mismatch_dwell_s: int = 10  # сколько секунд держаться, чтобы триггернуть
+    # Stage 10: hardware ration heater (для PZEM cmd-vs-meas check).
+    # ХД-4 500 setup: 1.5 kW. Generic ректификатор: 5 kW.
+    heater_max_kW: float = 5.0
 
     # === Третья волна ресёрча (см. 12.13.11) ===
 
@@ -497,8 +500,9 @@ class Controller:
 
         # PZEM-style: расхождение заданной мощности и реально измеренной
         # (детектирует пробой SSR в проводящее состояние / залипание реле / обрыв)
+        # Stage 10: P_max берётся из recipe.heater_max_kW (вместо хардкода 5).
         p_meas = sensors.get("P_heater_kW", 0.0)
-        p_expected = st.last_cmd_power * 5.0  # P_max = 5 kW; в проде брать из конфига
+        p_expected = st.last_cmd_power * r.heater_max_kW
         if st.phase in active_phases:
             if abs(p_meas - p_expected) > r.power_mismatch_kW:
                 if st.power_mismatch_since is None:

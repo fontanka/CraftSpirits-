@@ -177,8 +177,37 @@
           <input id="oborotniy_abv" type="number" value="0" min="0" max="80" step="5" class="small-input" />
         </div>
       </div>
+      <div style="margin-top: 6px; padding: 6px; background: var(--card2); border-radius: 4px;">
+        <div style="font-size: 11px; color: var(--muted); margin-bottom: 4px;">⚙ Column hardware</div>
+        <div class="row">
+          <div>
+            <label>Heater (kW)</label>
+            <input id="heater_kW" type="number" value="5.0" min="0.5" max="10" step="0.5" class="small-input" />
+          </div>
+          <div>
+            <label>Column type</label>
+            <select id="column_type" class="small-input">
+              <option value="packed" selected>packed (SPN)</option>
+              <option value="bubble_cap">bubble cap (ХД-4)</option>
+            </select>
+          </div>
+        </div>
+        <div class="row" style="margin-top: 4px;">
+          <div>
+            <label>N plates (bubble)</label>
+            <input id="n_plates" type="number" value="4" min="2" max="20" step="1" class="small-input" />
+          </div>
+          <div>
+            <label>H (m)</label>
+            <input id="column_H_m" type="number" value="1.0" min="0.3" max="2.0" step="0.1" class="small-input" />
+          </div>
+        </div>
+        <div style="margin-top: 4px;">
+          <button id="preset-xd4" class="small" style="width:100%;">📋 ХД-4 500 preset (1.5kW, bubble, 4 plates, 0.5m)</button>
+        </div>
+      </div>
       <div style="margin-top: 8px;">
-        <label><input type="checkbox" id="hw_enabled" /> Realistic hardware</label>
+        <label><input type="checkbox" id="hw_enabled" /> Realistic sensors/SSR/valves</label>
       </div>
       <div id="hw_panel" style="display:none; padding: 6px; background: var(--card2); border-radius: 4px; margin-top: 6px;">
         <div class="row">
@@ -234,7 +263,7 @@
       <div class="kv"><span class="k">T_head</span><span class="v" id="s-T_head">—</span></div>
       <div class="kv"><span class="k">T_water_in</span><span class="v" id="s-T_water_in">—</span></div>
       <div class="kv"><span class="k">T_water_out</span><span class="v" id="s-T_water_out">—</span></div>
-      <div class="kv"><span class="k">P_heater</span><span class="v" id="s-P_kW">—</span></div>
+      <div class="kv"><span class="k">P_heater</span><span class="v" id="s-P_kW">— / <span id="s-P_max">—</span> kW</span></div>
       <div class="kv"><span class="k">P_atm</span><span class="v" id="s-P_atm">—</span></div>
       <div class="kv"><span class="k">m_dot vapor</span><span class="v" id="s-m_dot">—</span></div>
     </div>
@@ -245,6 +274,27 @@
       <div class="kv"><span class="k">ABV</span><span class="v" id="kub-ABV">—</span></div>
       <div class="kv"><span class="k">Boiling</span><span class="v" id="kub-boil">—</span></div>
       <div id="kub-tags" style="margin-top:4px;"></div>
+    </div>
+
+    <div class="card">
+      <h2>Column diag</h2>
+      <div class="kv"><span class="k">type</span><span class="v" id="col-type">—</span></div>
+      <div class="kv"><span class="k">Cv</span><span class="v" id="col-Cv">—</span></div>
+      <div class="kv"><span class="k">N_eff</span><span class="v" id="col-N">—</span></div>
+      <div class="kv"><span class="k">ΔP</span><span class="v" id="col-dP">—</span></div>
+    </div>
+
+    <div class="card">
+      <h2>2× Condenser</h2>
+      <div class="kv"><span class="k">Water in</span><span class="v" id="cond-Tin">—</span></div>
+      <div class="kv"><span class="k">After product</span><span class="v" id="cond-Tmid">—</span></div>
+      <div class="kv"><span class="k">After main</span><span class="v" id="cond-Tout">—</span></div>
+      <div class="kv"><span class="k">Q_main</span><span class="v" id="cond-Qmain">—</span></div>
+      <div class="kv"><span class="k">Q_product</span><span class="v" id="cond-Qprod">—</span></div>
+      <div class="row" style="margin-top:6px;">
+        <button class="small warning" data-fault="main_bypass" data-val="1">🚱 main bypass</button>
+        <button class="small" data-fault="main_bypass" data-val="0">↩ restore</button>
+      </div>
     </div>
   </div>
 
@@ -427,7 +477,7 @@ function updateUI(s) {
   document.getElementById('s-T_head').textContent = num(p.T_head) + ' °C';
   document.getElementById('s-T_water_in').textContent = num(p.T_water_in) + ' °C';
   document.getElementById('s-T_water_out').textContent = num(p.T_water_out) + ' °C';
-  document.getElementById('s-P_kW').textContent = num(p.P_heater_kW, 2) + ' kW';
+  document.getElementById('s-P_kW').innerHTML = num(p.P_heater_kW, 2) + ' / <span id="s-P_max">' + (s.config.heater_kW || 5).toFixed(1) + '</span> kW';
   document.getElementById('s-P_atm').textContent = num(p.P_atm_hPa, 0) + ' hPa';
   document.getElementById('s-m_dot').textContent = num(p.m_dot_vapor_gps, 2) + ' g/s';
 
@@ -441,6 +491,22 @@ function updateUI(s) {
   if (p.dry_out) tags.push('<span class="badge err">dry-out</span>');
   if (p.foam) tags.push('<span class="badge warn">foam</span>');
   document.getElementById('kub-tags').innerHTML = tags.join(' ');
+
+  // Column diag
+  document.getElementById('col-type').textContent = p.column_type + (p.column_type === 'bubble_cap' ? ` (${p.n_plates}p)` : '');
+  document.getElementById('col-Cv').textContent = num(p.Cv, 2);
+  document.getElementById('col-N').textContent = p.N_eff;
+  document.getElementById('col-dP').textContent = num(p.delta_P_Pa, 0) + ' Pa';
+
+  // 2× Condenser
+  document.getElementById('cond-Tin').textContent = num(p.T_water_in) + ' °C';
+  document.getElementById('cond-Tmid').textContent = num(p.T_water_after_product) + ' °C';
+  const tout = num(p.T_water_out);
+  document.getElementById('cond-Tout').innerHTML = p.main_bypass_closed
+    ? tout + ' °C <span class="badge err">BYPASS</span>'
+    : tout + ' °C';
+  document.getElementById('cond-Qmain').textContent = num(p.Q_main_W, 0) + ' W';
+  document.getElementById('cond-Qprod').textContent = num(p.Q_product_W, 0) + ' W';
 
   // Phase progress + outputs
   const c = s.controller;
@@ -547,6 +613,13 @@ function connectWS() {
 }
 
 // Wire UI
+document.getElementById('preset-xd4').onclick = () => {
+  document.getElementById('heater_kW').value = 1.5;
+  document.getElementById('column_type').value = 'bubble_cap';
+  document.getElementById('n_plates').value = 4;
+  document.getElementById('column_H_m').value = 0.5;
+};
+
 document.getElementById('btn-start').onclick = async () => {
   const hwEnabled = document.getElementById('hw_enabled').checked;
   const body = {
@@ -558,6 +631,10 @@ document.getElementById('btn-start').onclick = async () => {
     sugar_g_L: +document.getElementById('sugar_g_L').value,
     oborotniy_V_L: +document.getElementById('oborotniy_V_L').value,
     oborotniy_abv: +document.getElementById('oborotniy_abv').value,
+    heater_kW: +document.getElementById('heater_kW').value,
+    column_type: document.getElementById('column_type').value,
+    n_plates: +document.getElementById('n_plates').value,
+    column_H_m: +document.getElementById('column_H_m').value,
   };
   if (hwEnabled) {
     body.hw = {
