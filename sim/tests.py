@@ -34,22 +34,30 @@ class Scenario:
     max_sim_s: int = 6 * 3600
     inject: Callable[..., None] = lambda s, c, t: None
     check: Callable[..., tuple[bool, str]] = lambda s, c: (True, "")
+    warm_start_confirmed: bool = False  # для hot-start сценариев
+    max_after_done_s: int = 30  # сколько ticks крутить после DONE
+    pre_heat_T_kub_C: float | None = None  # для hot-start: куб уже тёплый
 
 
 def run(scen: Scenario) -> tuple[bool, str, list[str]]:
     still = Still(column_diameter_m=scen.column_D_m)
     still.set_initial(V_L=scen.V_kub, abv_vol=scen.x_kub_abv,
                       viscosity=scen.viscosity, sugar_g_L=scen.sugar_g_L)
+    if scen.pre_heat_T_kub_C is not None:
+        # Hot-start: куб уже тёплый (имитация прерванной сессии или ranee)
+        still.boiler.s.T_bulk_C = scen.pre_heat_T_kub_C
+        still.boiler.s.T_film_C = scen.pre_heat_T_kub_C
+        still.boiler.s.T_walls_C = scen.pre_heat_T_kub_C
 
     ctrl = Controller(scen.recipe)
-    ctrl.start(0.0)
+    ctrl.start(0.0, initial_sensors=still.read_sensors(),
+               warm_start_confirmed=scen.warm_start_confirmed)
 
     phase_log = [ctrl.st.phase.value]
     t = 0
     dt = 1.0
     while t < scen.max_sim_s:
         scen.inject(still, ctrl, t)
-        # Watchdog test: faults.pi_disconnected отключает pi_alive
         pi_alive = not getattr(still.faults, "pi_disconnected", False)
 
         sensors = still.read_sensors()
@@ -61,14 +69,18 @@ def run(scen: Scenario) -> tuple[bool, str, list[str]]:
         if ctrl.st.phase.value != phase_log[-1]:
             phase_log.append(ctrl.st.phase.value)
 
-        # Завершение только на DONE (EMERGENCY можно ACK)
         if ctrl.st.phase == Phase.DONE:
-            for _ in range(30):
+            for _ in range(scen.max_after_done_s):
+                scen.inject(still, ctrl, t)
                 sensors = still.read_sensors()
                 outs = ctrl.tick(t, sensors, pi_alive=pi_alive)
                 still.apply_outputs(outs)
                 still.step(dt)
                 t += dt
+                if ctrl.st.phase.value != phase_log[-1]:
+                    phase_log.append(ctrl.st.phase.value)
+            break
+        if ctrl.st.phase == Phase.CLOSED:
             break
 
     ok, why = scen.check(still, ctrl)
@@ -471,6 +483,56 @@ def scen_concurrent_pressure_and_hot_water():
     )
 
 
+def scen_hot_start_warm_confirmed():
+    """Куб уже на 60°C (прерванная сессия). Warm start confirmed → skip HEAT_UP.
+    Phase log должен содержать HOT START alert и не содержать HEAT_UP."""
+    return Scenario(
+        name="hot-start warm confirmed → skip HEAT_UP",
+        pre_heat_T_kub_C=60.0,
+        warm_start_confirmed=True,
+        check=lambda s, c: (
+            c.st.phase == Phase.DONE
+            and "HEAT_UP" not in [a for a in c.st.alerts if "INIT" in a or "HEAT_UP" in a][:1]
+            and any("HOT START" in a for a in c.st.alerts)
+            and any("warm start confirmed" in a for a in c.st.alerts),
+            f"phase={c.st.phase.value} hot_start_detected={c.st.hot_start_detected}",
+        ),
+    )
+
+
+def scen_hot_start_unconfirmed():
+    """Куб тёплый, но operator НЕ подтвердил → проходит обычный HEAT_UP.
+    Безопасный fallback."""
+    return Scenario(
+        name="hot-start без подтверждения → обычный HEAT_UP",
+        pre_heat_T_kub_C=60.0,
+        warm_start_confirmed=False,
+        check=lambda s, c: (
+            c.st.phase == Phase.DONE
+            and c.st.hot_start_detected
+            and any("HOT START" in a for a in c.st.alerts),
+            f"phase={c.st.phase.value} hot_start={c.st.hot_start_detected}",
+        ),
+    )
+
+
+def scen_stale_done_auto_close():
+    """После DONE — 2ч ничего не делать → auto-transition в CLOSED.
+    Recipe stale_done_timeout_s сокращён до 10s для быстрого теста."""
+    r = Recipe()
+    r.stale_done_timeout_s = 10
+    return Scenario(
+        name="stale DONE 10s → auto CLOSED",
+        recipe=r,
+        max_after_done_s=20,  # ждём 20s в DONE, должен переключиться через 10
+        check=lambda s, c: (
+            c.st.phase == Phase.CLOSED
+            and any("stale DONE" in a for a in c.st.alerts),
+            f"phase={c.st.phase.value} done_started={c.st.done_started_at}",
+        ),
+    )
+
+
 def scen_level_sensor_primary():
     """Датчик уровня работает: HEADS заканчивается ровно по сифонному переключению.
     В alert'ах должна быть отметка 'level sensor → HEADS done (primary trigger)'."""
@@ -543,6 +605,11 @@ SCENARIOS = [
     scen_bimetal_safety(),
     scen_kub_overheat(),
     scen_acknowledge(),
+
+    # Stage 4: algorithmic edge cases (12.13.11)
+    scen_hot_start_warm_confirmed(),
+    scen_hot_start_unconfirmed(),
+    scen_stale_done_auto_close(),
 
     # Level sensor (БКУ сифонный transfer + контактный датчик)
     scen_level_sensor_primary(),

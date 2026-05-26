@@ -20,6 +20,7 @@ from physics import Outputs, mass_to_abv_vol
 class Phase(str, Enum):
     IDLE = "IDLE"
     INIT = "INIT"
+    PRE_FLIGHT = "PRE_FLIGHT"  # короткий impulse heater + проверка cooling water
     HEAT_UP = "HEAT_UP"
     STABILIZE = "STABILIZE"
     HEADS = "HEADS"
@@ -28,6 +29,7 @@ class Phase(str, Enum):
     TAILS = "TAILS"
     SHUTDOWN = "SHUTDOWN"
     DONE = "DONE"
+    CLOSED = "CLOSED"  # после DONE + 2ч inactivity (см. 12.13.11)
     EMERGENCY = "EMERGENCY"
     PAUSE = "PAUSE"
 
@@ -92,11 +94,110 @@ class Recipe:
     power_mismatch_kW: float = 0.5  # порог |P_set - P_meas|
     power_mismatch_dwell_s: int = 10  # сколько секунд держаться, чтобы триггернуть
 
+    # === Третья волна ресёрча (см. 12.13.11) ===
+
+    # Hot-start: если T_kub > T_ambient + N → propose warm start (skip HEAT_UP).
+    # T_ambient берём как 22°C по умолчанию (можно из BME280)
+    hot_start_dT_threshold_K: float = 15.0  # выше ambient → считаем «тёплый»
+
+    # PRE_FLIGHT: опциональная проверка cooling water. По дефолту OFF —
+    # требует достаточно длинный pulse (60+ сек на 50+%) чтобы холодильник
+    # нагрелся и появилось видимое ΔT. Включать в production recipes когда
+    # рассчитаны параметры под конкретную установку.
+    # Если включить: pulse heater_power × duration → measure ΔT_water_out.
+    # ΔT < min → emergency «вода не течёт». ΔT > max → warn (слабый поток).
+    pre_flight_enabled: bool = False
+    pre_flight_duration_s: int = 60
+    pre_flight_heater_power: float = 0.5
+    pre_flight_min_water_dT_K: float = 0.5
+    pre_flight_max_water_dT_K: float = 5.0
+
+    # Re-fermentation guard: foam/pressure считаем «approaching boil» только
+    # если T_kub уже > 70°C. До этого — это CO2 outgassing подмоложенной браги.
+    refermentation_guard_T_kub_C: float = 70.0
+
+    # Stale DONE: после N секунд бездействия в DONE → CLOSED (закрыть воду,
+    # все клапаны, summary). Защита от operator ушёл и забыл.
+    stale_done_timeout_s: int = 7200  # 2 часа
+
 
 def baro_correct(T_head_C: float, P_atm_hPa: float) -> float:
     """Корректирует T_head к стандартному давлению 1013.25 hPa.
     Коэффициент 0.037 °C/hPa для этанола."""
     return T_head_C - 0.037 * (P_atm_hPa - 1013.25)
+
+
+class _EMA:
+    """Простой EMA-фильтр с τ в секундах."""
+
+    def __init__(self, tau_s: float, init_val: float | None = None):
+        self.tau_s = tau_s
+        self.val: float | None = init_val
+
+    def step(self, raw: float, dt: float) -> float:
+        if math.isnan(raw):
+            # Сбрасываем — иначе filter «маскирует» потерянный датчик
+            self.val = None
+            return float("nan")
+        if self.val is None:
+            self.val = raw
+            return raw
+        alpha = dt / (self.tau_s + dt)
+        self.val += (raw - self.val) * alpha
+        return self.val
+
+
+class _Median3:
+    """Median-of-3: режет одиночные spikes (полезно против sentinel values DS18B20)."""
+
+    def __init__(self):
+        self.buf: list[float] = []
+
+    def step(self, raw: float) -> float:
+        if math.isnan(raw):
+            self.buf.clear()
+            return raw
+        self.buf.append(raw)
+        if len(self.buf) > 3:
+            self.buf.pop(0)
+        if len(self.buf) < 3:
+            return raw
+        return sorted(self.buf)[1]
+
+
+class SensorFilter:
+    """Per-input filtering. Median-of-3 → EMA. Разные τ под разные сигналы
+    (T_head быстро, P_atm медленно, см. 12.13.11 noise-stacking guidance).
+
+    Использование: filt.update(raw_sensors, dt) → возвращает dict с теми же
+    ключами, но отфильтрованными.
+    """
+
+    def __init__(self):
+        # τ калибровались вручную:
+        # - T_head 2с — нужен быстрый отклик на свежий пар
+        # - T_kub 5с — медленнее, тепловая масса огромная
+        # - T_water 10с — даже медленнее, проточная вода
+        # - P_atm 60с — атмосфера меняется в десятки минут
+        # - P_heater 5с — PZEM сам уже медленный (1Hz update)
+        # NB: P_heater_kW намеренно НЕ фильтруется — PZEM-004T уже 1Hz
+        # усреднён внутри, а нам нужен fast detect SSR mismatch.
+        # Фильтрация только для медленно изменяющихся температур / давления.
+        self._chains: dict[str, tuple[_Median3, _EMA]] = {
+            "T_kub": (_Median3(), _EMA(5.0)),
+            "T_head": (_Median3(), _EMA(2.0)),
+            "T_water_in": (_Median3(), _EMA(10.0)),
+            "T_water_out": (_Median3(), _EMA(10.0)),
+            "P_atm_hPa": (_Median3(), _EMA(60.0)),
+        }
+
+    def update(self, sensors: dict, dt: float) -> dict:
+        out = dict(sensors)
+        for key, (med, ema) in self._chains.items():
+            if key in sensors:
+                med_val = med.step(sensors[key])
+                out[key] = ema.step(med_val, dt)
+        return out
 
 
 @dataclass
@@ -136,6 +237,22 @@ class ControllerState:
     # Последняя выданная мощность (для PZEM)
     last_cmd_power: float = 0.0
 
+    # === Третья волна ===
+
+    # Hot-start: detected на ARM. Если True — operator может skip HEAT_UP
+    # (auto-skip когда operator_warm_start_confirmed=True).
+    hot_start_detected: bool = False
+    operator_warm_start_confirmed: bool = False  # operator UI tick
+
+    # PRE_FLIGHT: записываем T_water_out на старте, чтобы измерить ΔT
+    pre_flight_water_out_start: float | None = None
+
+    # Re-fermentation guard: алерт, если foam обнаружен ДО T_kub > 70°C
+    refermentation_alerted: bool = False
+
+    # DONE timing — для stale auto-close
+    done_started_at: float | None = None
+
 
 class Controller:
     """
@@ -149,19 +266,47 @@ class Controller:
         self.session_started_at: float | None = None
         self.duty_current: float = 0.0
         self.pause_requested: bool = False
+        self.filter = SensorFilter()
+        self._last_tick_t: float | None = None
+        # T_ambient — берётся из BME280 если есть, дефолт 22°C
+        self.t_ambient_C: float = 22.0
 
-    def start(self, t_sim: float, recipe: Recipe | None = None):
+    def start(self, t_sim: float, recipe: Recipe | None = None,
+              initial_sensors: dict | None = None,
+              warm_start_confirmed: bool = False):
+        """Старт сессии. Если initial_sensors переданы — проверяем hot-start
+        condition. Operator может подтвердить warm_start_confirmed=True чтобы
+        пропустить HEAT_UP (см. 12.13.11)."""
         if recipe:
             self.r = recipe
+
+        hot_start = False
+        if initial_sensors:
+            t_kub_init = initial_sensors.get("T_kub", float("nan"))
+            t_amb = initial_sensors.get("T_amb_C", self.t_ambient_C)
+            if not math.isnan(t_kub_init):
+                if t_kub_init > t_amb + self.r.hot_start_dT_threshold_K:
+                    hot_start = True
+
         self.st = ControllerState(
             phase=Phase.INIT,
             phase_started_at=t_sim,
             pwm_phase_start=t_sim,
             last_pi_command_at=t_sim,
+            hot_start_detected=hot_start,
+            operator_warm_start_confirmed=warm_start_confirmed,
         )
         self.session_started_at = t_sim
         self.duty_current = 0.0
         self.pause_requested = False
+        self.filter = SensorFilter()
+        self._last_tick_t = None
+
+        if hot_start:
+            self._add_alert(
+                f"{t_sim:.0f}s: HOT START detected (T_kub already warm); "
+                f"warm_start_confirmed={warm_start_confirmed}"
+            )
 
     def request_stop(self, t_sim: float):
         """Корректный стоп: используем sim-time, не wall clock."""
@@ -208,10 +353,22 @@ class Controller:
         st.t_head_prev_time = t_sim
 
     def tick(self, t_sim: float, sensors: dict, pi_alive: bool = True) -> Outputs:
-        """Один шаг логики. Возвращает выходы для железа."""
+        """Один шаг логики. Возвращает выходы для железа.
+
+        Фильтруем raw sensors через SensorFilter перед использованием — все
+        алгоритмические решения принимаются на сглаженных значениях
+        (см. 12.13.11 noise-stacking guidance)."""
         outs = Outputs()
         r = self.r
         st = self.st
+
+        # === Sensor filtering (median-of-3 + EMA per channel) ===
+        if self._last_tick_t is None:
+            dt = 1.0
+        else:
+            dt = max(t_sim - self._last_tick_t, 1e-3)
+        self._last_tick_t = t_sim
+        sensors = self.filter.update(sensors, dt)
 
         if pi_alive:
             st.last_pi_command_at = t_sim
@@ -265,8 +422,23 @@ class Controller:
             outs.valve_water = (t_sim - st.phase_started_at) < 300
             return outs
 
-        # === IDLE / DONE ===
-        if st.phase in (Phase.IDLE, Phase.DONE):
+        # === IDLE / CLOSED ===
+        if st.phase in (Phase.IDLE, Phase.CLOSED):
+            return outs
+
+        # === DONE: после 2ч бездействия → CLOSED (всё выключить, alarm) ===
+        if st.phase == Phase.DONE:
+            if st.done_started_at is None:
+                st.done_started_at = t_sim
+            if (t_sim - st.done_started_at) > r.stale_done_timeout_s:
+                self._add_alert(
+                    f"{t_sim:.0f}s: stale DONE {r.stale_done_timeout_s//3600}ч → CLOSED "
+                    "(operator не закрыл сессию)"
+                )
+                outs.contactor_enable = False
+                outs.valve_water = False
+                outs.valve_takeoff = False
+                self._transition(Phase.CLOSED, t_sim)
             return outs
 
         # Барокоррекция T_head
@@ -303,17 +475,72 @@ class Controller:
 
         # === Стейт-машина ===
         if st.phase == Phase.INIT:
-            self._transition(Phase.HEAT_UP, t_sim)
+            if r.pre_flight_enabled:
+                st.pre_flight_water_out_start = sensors.get(
+                    "T_water_out", float("nan")
+                )
+                self._transition(Phase.PRE_FLIGHT, t_sim)
+            else:
+                # Skip pre-flight — typical для quick start / sim default
+                self._proceed_after_pre_flight(t_sim)
+
+        elif st.phase == Phase.PRE_FLIGHT:
+            # Pulse heater на 30% мощности → ΔT_water_out измеряем за 30 сек
+            outs.heater_power = r.pre_flight_heater_power * power_scale
+            outs.valve_takeoff = False
+            self.duty_current = 0.0
+
+            if phase_elapsed > r.pre_flight_duration_s:
+                t_w_start = st.pre_flight_water_out_start
+                t_w_now = sensors.get("T_water_out", float("nan"))
+                if t_w_start is None or math.isnan(t_w_start) or math.isnan(t_w_now):
+                    self.emergency(
+                        "PRE_FLIGHT: T_water_out unavailable", t_sim
+                    )
+                else:
+                    delta = t_w_now - t_w_start
+                    if delta < r.pre_flight_min_water_dT_K:
+                        self.emergency(
+                            f"PRE_FLIGHT: ΔT_water {delta:.2f}K < min "
+                            f"{r.pre_flight_min_water_dT_K} — вода не течёт?",
+                            t_sim,
+                        )
+                    elif delta > r.pre_flight_max_water_dT_K:
+                        self._add_alert(
+                            f"{t_sim:.0f}s: PRE_FLIGHT WARN ΔT_water {delta:.2f}K > "
+                            f"{r.pre_flight_max_water_dT_K} — слабый поток воды"
+                        )
+                        self._proceed_after_pre_flight(t_sim)
+                    else:
+                        self._add_alert(
+                            f"{t_sim:.0f}s: PRE_FLIGHT OK, ΔT_water={delta:.2f}K"
+                        )
+                        self._proceed_after_pre_flight(t_sim)
 
         elif st.phase == Phase.HEAT_UP:
             outs.heater_power = r.p_heat_up / 100.0 * power_scale
             outs.valve_takeoff = False
 
+            # Re-fermentation guard (см. 12.13.5): если foam обнаружен ДО
+            # T_kub > 70°C — это CO2 outgassing подмоложенной браги, а не пар.
+            # Лог alert (не emergency, может быть нормальный stage прогрева).
+            foam_signal = sensors.get("foam_active", False)
+            if (foam_signal and not math.isnan(t_kub)
+                    and t_kub < r.refermentation_guard_T_kub_C
+                    and not st.refermentation_alerted):
+                st.refermentation_alerted = True
+                self._add_alert(
+                    f"{t_sim:.0f}s: WARN foam @ T_kub={t_kub:.1f}°C — likely CO2 "
+                    f"outgassing (под-fermented mash), not steam"
+                )
+
             if r.mode == Mode.REFLUX:
                 if not math.isnan(t_head_corr) and t_head_corr > r.t_head_start:
                     self._transition(Phase.STABILIZE, t_sim)
             else:  # POTSTILL: пар пошёл, переходим в BODY
-                if not math.isnan(t_kub) and t_kub > 78:
+                # Также применяем re-fermentation guard: T_kub > 70°C обязательно
+                if (not math.isnan(t_kub) and t_kub > 78
+                        and t_kub > r.refermentation_guard_T_kub_C):
                     self._transition(Phase.BODY, t_sim)
 
             if phase_elapsed > r.t_heat_up_max_s:
@@ -423,6 +650,18 @@ class Controller:
         st.last_cmd_power = outs.heater_power
 
         return outs
+
+    def _proceed_after_pre_flight(self, t_sim: float):
+        """После успешного PRE_FLIGHT — либо HEAT_UP, либо skip к STABILIZE
+        при confirmed warm start (см. 12.13.11)."""
+        if self.st.hot_start_detected and self.st.operator_warm_start_confirmed:
+            self._add_alert(
+                f"{t_sim:.0f}s: warm start confirmed → skipping HEAT_UP, "
+                f"входим в STABILIZE"
+            )
+            self._transition(Phase.STABILIZE, t_sim)
+        else:
+            self._transition(Phase.HEAT_UP, t_sim)
 
     def _transition(self, new_phase: Phase, t_sim: float):
         old = self.st.phase
