@@ -277,6 +277,7 @@
       <h2>Sensors</h2>
       <div class="kv"><span class="k">T_kub</span><span class="v" id="s-T_kub">—</span></div>
       <div class="kv"><span class="k">T_head</span><span class="v" id="s-T_head">—</span></div>
+      <div class="kv"><span class="k">T_atm_tube</span><span class="v" id="s-T_atm">—</span></div>
       <div class="kv"><span class="k">T_water_in</span><span class="v" id="s-T_water_in">—</span></div>
       <div class="kv"><span class="k">T_water_out</span><span class="v" id="s-T_water_out">—</span></div>
       <div class="kv"><span class="k">P_heater</span><span class="v" id="s-P_kW">— / <span id="s-P_max">—</span> kW</span></div>
@@ -491,6 +492,10 @@ function updateUI(s) {
   const p = s.physical;
   document.getElementById('s-T_kub').textContent = num(p.T_kub) + ' °C';
   document.getElementById('s-T_head').textContent = num(p.T_head) + ' °C';
+  const atmStr = num(p.T_atm_tube) + ' °C';
+  document.getElementById('s-T_atm').innerHTML = p.T_atm_tube > 90
+    ? atmStr + ' <span class="badge err">≥90°C</span>'
+    : atmStr;
   document.getElementById('s-T_water_in').textContent = num(p.T_water_in) + ' °C';
   document.getElementById('s-T_water_out').textContent = num(p.T_water_out) + ' °C';
   document.getElementById('s-P_kW').innerHTML = num(p.P_heater_kW, 2) + ' / <span id="s-P_max">' + (s.config.heater_kW || 5).toFixed(1) + '</span> kW';

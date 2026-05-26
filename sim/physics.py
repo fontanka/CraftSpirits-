@@ -767,12 +767,48 @@ class StillFaults:
     under_fermented: bool = False
 
 
+def _compute_T_atm_tube(T_water_out_C: float, T_head_C: float,
+                         main_bypass_closed: bool, column_flooded: bool,
+                         Cv: float) -> float:
+    """Атмосферная трубка дефлегматора — exit для несконденсированных
+    газов. Алгоритм:
+    - Норма: T_water_out + 10°C (немного выше водой охлаждённой стенки)
+    - Если main reflux condenser bypassed → быстро ~T_head (vapor проходит
+      без конденсации)
+    - При flooding → промежуточная температура (часть пара пробивается)
+    - При Cv > 0.85 (near-flood) — лёгкое повышение
+    """
+    base = T_water_out_C + 10
+    if main_bypass_closed:
+        return T_head_C - 2
+    if column_flooded:
+        return max(base, T_head_C - 5)
+    if Cv > 0.85:
+        return base + (Cv - 0.85) * 100  # linearly up до +15°C @ Cv=1.0
+    return base
+
+
 @dataclass
 class StillObservables:
-    """Что выдаёт физика наружу — что «датчики могли бы прочитать»."""
+    """Что выдаёт физика наружу — что «датчики могли бы прочитать».
+
+    Sensor topology реального аппарата ХД/4-375 + БКУ-07М (russsam.ru,
+    samogon-i-vodka.ru):
+    - T_kub_bulk_C   — DS18B20 в кубе (in mash) — НЕ часть БКУ-07М базового
+                      comлекта, но обычно ставится отдельно
+    - T_head_C       — DS18B20 в термокармане узла отбора (60mm ID × 120mm)
+                      — основной канал БКУ-07М, по нему регулируется отбор
+    - T_atm_tube_C   — DS1821 на атмосферной трубке дефлегматора, порог 93°C,
+                      аварийная отсечка (выкл. ТЭН при достижении)
+    - T_water_in/out — для контроля cooling (опц. в БКУ-07М)
+
+    Уровень голов = level_sensor_heads (контактный щуп БКУ).
+    Защита перелива = отдельный щуп в главном приёмнике (БКУ-07М встроена).
+    """
     T_kub_bulk_C: float
     T_kub_wall_C: float  # стенка куба — другая T, для dry-out detection
     T_head_C: float
+    T_atm_tube_C: float  # DS1821 на атмосферной трубке дефлегматора (93°C trip)
     T_water_in_C: float
     T_water_out_C: float
     P_atm_hPa: float
@@ -1163,6 +1199,18 @@ class Still:
             T_kub_bulk_C=b.T_bulk_C,
             T_kub_wall_C=b.T_walls_C,
             T_head_C=self.column.T_top_C() + b.probe_fouled_bias_C,
+            # T_atm_tube: атмосферная трубка дефлегматора — выход для
+            # несконденсированных газов. В норме держится около T_water_out +
+            # 5-15°C (пар успевает сконденсироваться полностью). Растёт
+            # резко при: потере охлаждения (bypass), захлёбе, прорыве голов.
+            # Порог 93°C у БКУ-07М — это именно детект прорыва.
+            T_atm_tube_C=_compute_T_atm_tube(
+                T_water_out_C=c.T_water_out_C,
+                T_head_C=self.column.T_top_C(),
+                main_bypass_closed=c.main_bypass_closed,
+                column_flooded=col.flooded,
+                Cv=col.Cv,
+            ),
             T_water_in_C=c.T_water_in_C,
             T_water_out_C=c.T_water_out_C,
             P_atm_hPa=self.P_atm_Pa_base / 100,
@@ -1229,6 +1277,7 @@ class Still:
             "T_kub": t_kub,
             "T_kub_wall": t_kub_wall,
             "T_head": t_head,
+            "T_atm_tube": o.T_atm_tube_C,
             "T_water_in": t_water_in,
             "T_water_out": t_water_out,
             "P_atm_hPa": o.P_atm_hPa,

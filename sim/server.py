@@ -186,6 +186,7 @@ class SimEngine:
                 "T_kub": o.T_kub_bulk_C,
                 "T_kub_wall": o.T_kub_wall_C,
                 "T_head": o.T_head_C,
+                "T_atm_tube": o.T_atm_tube_C,
                 "T_water_in": o.T_water_in_C,
                 "T_water_out": o.T_water_out_C,
                 "T_water_after_product": s.condenser.s.T_water_after_product_C,

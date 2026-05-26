@@ -126,6 +126,10 @@ class Recipe:
     # ХД-4 500 setup: 3 kW. Generic ректификатор: 5 kW.
     heater_max_kW: float = 5.0
 
+    # Stage 13: БКУ-07М аварийный датчик на атмосферной трубке дефлегматора
+    # (DS1821, programmable trip ~93°C). При прорыве пара/воды/перегреве сверху.
+    t_atm_tube_emergency_C: float = 93.0
+
     # Stage 11: takeoff control mode (см. forum discussion auto vs manual ABV).
     # 'pwm'    — классический start-stop с duty_body, фиксированный период
     # 'smooth' — плавная пропорциональная регулировка через partial-open valve
@@ -508,6 +512,15 @@ class Controller:
             self.emergency("bimetal tripped", t_sim)
         if not math.isnan(t_water_out) and t_water_out > r.t_water_out_stop:
             self.emergency(f"T_water_out > {r.t_water_out_stop}°C", t_sim)
+        # БКУ-07М аварийный 93°C на атмосферной трубке дефлегматора:
+        # если T_atm_tube > порог → emergency. Срабатывает при потере воды
+        # охлаждения / захлёбе / прорыве голов в атмосферный выход.
+        t_atm = sensors.get("T_atm_tube", float("nan"))
+        if not math.isnan(t_atm) and t_atm > r.t_atm_tube_emergency_C:
+            self.emergency(
+                f"T_atm_tube > {r.t_atm_tube_emergency_C}°C (БКУ-07М 93°C alarm)",
+                t_sim,
+            )
 
         # PZEM-style: расхождение заданной мощности и реально измеренной
         # (детектирует пробой SSR в проводящее состояние / залипание реле / обрыв)
