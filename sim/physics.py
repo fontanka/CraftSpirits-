@@ -616,9 +616,17 @@ class StillObservables:
     P_atm_hPa: float
     V_kub_L: float
     V_product_L: float
+    V_heads_L: float
+    V_body_L: float
+    V_tails_L: float
+    active_receiver: str
+    heads_full_flag: bool  # сигнал датчика уровня
     x_kub_abv: float
     x_head_abv: float
     x_product_abv: float
+    x_heads_abv: float
+    x_body_abv: float
+    x_tails_abv: float
     x_head_mass: List[float]  # full composition for advanced
     x_product_mass: List[float]
     # Hydrodynamics
@@ -638,18 +646,32 @@ class StillObservables:
 
 
 class Still:
-    """Совмещённая модель куб + колонна + холодильник + узел отбора."""
+    """Совмещённая модель куб + колонна + холодильник + узел отбора + приёмники."""
+
+    # Объём приёмника голов до срабатывания сифона (заводская часть БКУ).
+    # 150 мл — типичное значение, можно настроить через self.heads_cup_volume_L.
+    DEFAULT_HEADS_CUP_VOLUME_L: float = 0.150
 
     def __init__(self, column_diameter_m: float = 0.04):
+        from hardware import LevelSensor
         self.boiler = Boiler()
         col_params = ColumnParams(D_m=column_diameter_m)
         self.column = Column(col_params)
         self.condenser = Condenser()
         self.faults = StillFaults()
+        self.level_sensor_heads = LevelSensor()
         self.t_sim_s = 0.0
-        # Product receiver
-        self.V_product_L = 0.0
-        self.x_product_mass: List[float] = [0]*N_COMP
+        # Product receivers — разделены сифонной механикой
+        self.V_heads_L = 0.0
+        self.V_body_L = 0.0
+        self.V_tails_L = 0.0
+        self.x_heads_mass: List[float] = [0]*N_COMP
+        self.x_body_mass: List[float] = [0]*N_COMP
+        self.x_tails_mass: List[float] = [0]*N_COMP
+        # Какой приёмник сейчас активен (механически)
+        self.active_receiver: str = "heads"  # heads → body → tails
+        self.heads_cup_volume_L: float = self.DEFAULT_HEADS_CUP_VOLUME_L
+        self.heads_full_flag: bool = False  # выставляется когда сифон переключился
         # Outputs from controller (heater %, valve states)
         self.heater_power = 0.0  # 0..1
         self.valve_takeoff_open = False
@@ -665,8 +687,14 @@ class Still:
         self.boiler.s.T_film_C = 22.0
         self.boiler.s.T_walls_C = 22.0
         self.column = Column(self.column.p)
-        self.V_product_L = 0
-        self.x_product_mass = [0]*N_COMP
+        self.V_heads_L = 0
+        self.V_body_L = 0
+        self.V_tails_L = 0
+        self.x_heads_mass = [0]*N_COMP
+        self.x_body_mass = [0]*N_COMP
+        self.x_tails_mass = [0]*N_COMP
+        self.active_receiver = "heads"
+        self.heads_full_flag = False
 
     def step(self, dt: float):
         # Pressure drift
@@ -699,23 +727,17 @@ class Still:
         # 3. Condenser step — all vapor condenses
         self.condenser.step(dt, m_dot_vapor, y_top_mass, self.faults.water_cutoff)
 
-        # 4. Узел отбора (LM): если клапан открыт, конденсат уходит в product
-        # и куб теряет соответствующую массу (с составом верхушки колонны)
+        # 4. Узел отбора (LM): если клапан открыт, конденсат уходит в активный приёмник.
+        # Механическое сифонное устройство переводит поток heads → body → tails
+        # автоматически (без нашего управления).
         if self.valve_takeoff_open and m_dot_vapor > 0:
-            m_dt = m_dot_vapor * dt  # kg condensate to product
+            m_dt = m_dot_vapor * dt
             rho_prod = density_mix_liq(y_top_mass, 60)
             V_dt_L = m_dt / rho_prod * 1000
 
-            # Add to product receiver
-            if self.V_product_L + V_dt_L > 0:
-                for k in range(N_COMP):
-                    self.x_product_mass[k] = (
-                        self.x_product_mass[k] * self.V_product_L
-                        + y_top_mass[k] * V_dt_L
-                    ) / (self.V_product_L + V_dt_L)
-            self.V_product_L += V_dt_L
+            self._add_to_active_receiver(V_dt_L, y_top_mass)
 
-            # Куб теряет соответствующую массу (с составом y_top, что уходит в product)
+            # Куб теряет соответствующую массу (с составом y_top)
             rho_kub = density_mix_liq(self.boiler.s.x_mass, self.boiler.s.T_bulk_C)
             m_kub_kg = self.boiler.s.V_total_L / 1000 * rho_kub
             if m_kub_kg > m_dt:
@@ -725,15 +747,85 @@ class Still:
                     eth_after = max(0, eth_before - eth_leaving)
                     new_total = m_kub_kg - m_dt
                     self.boiler.s.x_mass[k] = eth_after / new_total if new_total > 0 else 0
-                # Renormalize
                 tot = sum(self.boiler.s.x_mass)
                 if tot > 0:
                     self.boiler.s.x_mass = [x/tot for x in self.boiler.s.x_mass]
-                # Volume
                 rho_new = density_mix_liq(self.boiler.s.x_mass, self.boiler.s.T_bulk_C)
                 self.boiler.s.V_total_L -= m_dt / rho_new * 1000
 
+        # 5. Level sensor: видит ли датчик «полно» (после сифонного переключения)
+        # physical_full = True когда сифон сработал И heads cup действительно заполнен
+        physical_full = self.heads_full_flag
+        self.level_sensor_heads.step(dt, self.t_sim_s, physical_full)
+
+        # 6. Механическое переключение body→tails: при сильно обеднённом кубе
+        # (~ выходе на хвосты по T_kub) оператор/механика переставляет ёмкость.
+        # Threshold: T_kub > 95°C — то же что используют реальные операторы.
+        if self.active_receiver == "body" and self.boiler.s.T_bulk_C > 95:
+            self.active_receiver = "tails"
+
         self.t_sim_s += dt
+
+    def _add_to_active_receiver(self, V_L: float, composition_mass: List[float]):
+        """Добавляет жидкость в текущий активный приёмник.
+        Срабатывает сифон при заполнении приёмника голов."""
+        if self.active_receiver == "heads":
+            new_V = self.V_heads_L + V_L
+            if new_V > 0:
+                for k in range(N_COMP):
+                    self.x_heads_mass[k] = (
+                        self.x_heads_mass[k] * self.V_heads_L
+                        + composition_mass[k] * V_L
+                    ) / new_V
+            self.V_heads_L = new_V
+
+            # Сифон срабатывает при заполнении ёмкости голов
+            if self.V_heads_L >= self.heads_cup_volume_L and not self.heads_full_flag:
+                self.heads_full_flag = True
+                self.active_receiver = "body"
+        elif self.active_receiver == "body":
+            new_V = self.V_body_L + V_L
+            if new_V > 0:
+                for k in range(N_COMP):
+                    self.x_body_mass[k] = (
+                        self.x_body_mass[k] * self.V_body_L
+                        + composition_mass[k] * V_L
+                    ) / new_V
+            self.V_body_L = new_V
+        else:  # tails
+            new_V = self.V_tails_L + V_L
+            if new_V > 0:
+                for k in range(N_COMP):
+                    self.x_tails_mass[k] = (
+                        self.x_tails_mass[k] * self.V_tails_L
+                        + composition_mass[k] * V_L
+                    ) / new_V
+            self.V_tails_L = new_V
+
+    def switch_to_tails_receiver(self):
+        """Вызывается контроллером при переходе в фазу TAILS — переключает
+        активный приёмник на третью ёмкость (в реале — оператор подставляет)."""
+        self.active_receiver = "tails"
+
+    # Совместимость со старым API
+    @property
+    def V_product_L(self) -> float:
+        return self.V_heads_L + self.V_body_L + self.V_tails_L
+
+    @property
+    def x_product_mass(self) -> List[float]:
+        """Усреднённый состав всех приёмников по массе."""
+        total_V = self.V_product_L
+        if total_V < 1e-9:
+            return [0]*N_COMP
+        out = [0.0]*N_COMP
+        for k in range(N_COMP):
+            out[k] = (
+                self.x_heads_mass[k] * self.V_heads_L
+                + self.x_body_mass[k] * self.V_body_L
+                + self.x_tails_mass[k] * self.V_tails_L
+            ) / total_V
+        return out
 
     def observables(self) -> StillObservables:
         b = self.boiler.s
@@ -748,9 +840,17 @@ class Still:
             P_atm_hPa=self.P_atm_Pa_base / 100,
             V_kub_L=b.V_total_L,
             V_product_L=self.V_product_L,
+            V_heads_L=self.V_heads_L,
+            V_body_L=self.V_body_L,
+            V_tails_L=self.V_tails_L,
+            active_receiver=self.active_receiver,
+            heads_full_flag=self.heads_full_flag,
             x_kub_abv=mass_to_abv_vol(b.x_mass[1]) if sum(b.x_mass) > 0 else 0,
             x_head_abv=mass_to_abv_vol(self._top_eth_mass()),
             x_product_abv=mass_to_abv_vol(self.x_product_mass[1]),
+            x_heads_abv=mass_to_abv_vol(self.x_heads_mass[1]),
+            x_body_abv=mass_to_abv_vol(self.x_body_mass[1]),
+            x_tails_abv=mass_to_abv_vol(self.x_tails_mass[1]),
             x_head_mass=self.column._top_composition(),
             x_product_mass=self.x_product_mass[:],
             Cv=col.Cv,
@@ -806,4 +906,11 @@ class Still:
             "flooded": o.flooded,
             "weeping": o.weeping,
             "dry_out": o.dry_out,
+            # Level sensor signal (debounced) — primary trigger HEADS→STABILIZE2
+            "level_heads_full": self.level_sensor_heads.s.debounced_signal,
+            "level_heads_raw": self.level_sensor_heads.s.raw_signal,
+            "level_oxidation": self.level_sensor_heads.s.oxidation_level,
+            "V_heads_L": o.V_heads_L,
+            "V_body_L": o.V_body_L,
+            "active_receiver": o.active_receiver,
         }

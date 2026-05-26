@@ -51,7 +51,10 @@ class Recipe:
     # Температуры (с учётом барокоррекции)
     t_head_start: float = 78.0  # колонна вышла на режим
     t_head_max_body: float = 78.5  # выход из body — T_head поднялась = хвосты пошли
-    t_kub_body: float = 88.0  # переход heads → body по T_kub
+    # t_kub_body — порог BACKUP (если level sensor молчит). Должен быть выше
+    # T_boil начального состава (~98-99 °C для 12% mash) и ниже t_kub_tails.
+    # Главный trigger — level sensor (см. 12.12), это просто страховка.
+    t_kub_body: float = 99.5  # backup переход heads → body
     t_kub_tails: float = 95.0
     t_kub_stop: float = 99.0
 
@@ -338,7 +341,19 @@ class Controller:
             outs.heater_power = r.p_work / 100.0 * power_scale
             self.duty_current = r.duty_heads
             outs.valve_takeoff = self._pwm(t_sim, r.duty_heads, r.pwm_period_s)
-            if not math.isnan(t_kub) and t_kub > r.t_kub_body:
+
+            # Primary trigger: датчик уровня в приёмнике голов (БКУ сифон сработал)
+            level_full = sensors.get("level_heads_full", False)
+            if level_full:
+                self._add_alert(
+                    f"{t_sim:.0f}s: level sensor → HEADS done (primary trigger)"
+                )
+                self._transition(Phase.STABILIZE2, t_sim)
+            # Backup: T_kub превысила порог (датчик уровня сбойнул / отключен)
+            elif not math.isnan(t_kub) and t_kub > r.t_kub_body:
+                self._add_alert(
+                    f"{t_sim:.0f}s: T_kub backup → HEADS done (datchik silent?)"
+                )
                 self._transition(Phase.STABILIZE2, t_sim)
 
         elif st.phase == Phase.STABILIZE2:

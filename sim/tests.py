@@ -471,6 +471,61 @@ def scen_concurrent_pressure_and_hot_water():
     )
 
 
+def scen_level_sensor_primary():
+    """Датчик уровня работает: HEADS заканчивается ровно по сифонному переключению.
+    В alert'ах должна быть отметка 'level sensor → HEADS done (primary trigger)'."""
+    return Scenario(
+        name="level sensor primary trigger (нормальная работа)",
+        check=lambda s, c: (
+            c.st.phase == Phase.DONE
+            and any("level sensor" in a for a in c.st.alerts)
+            and abs(s.observables().V_heads_L - s.heads_cup_volume_L) < 0.01,
+            f"phase={c.st.phase.value} V_heads={s.observables().V_heads_L*1000:.0f}mL",
+        ),
+    )
+
+
+def scen_level_sensor_stuck_open():
+    """Поплавок застрял в нижнем положении (mechanical stuck open) — датчик
+    НИКОГДА не срабатывает. T_kub backup должен спасти сессию."""
+    def inject(s, c, t):
+        if t == 1:
+            s.level_sensor_heads.s.mechanical_stuck_open = True
+
+    return Scenario(
+        name="level sensor stuck-open → T_kub backup срабатывает",
+        max_sim_s=15000,
+        inject=inject,
+        check=lambda s, c: (
+            c.st.phase == Phase.DONE
+            and any("T_kub backup" in a for a in c.st.alerts),
+            f"phase={c.st.phase.value} alerts_w_backup="
+            f"{[a for a in c.st.alerts if 'backup' in a.lower()]}",
+        ),
+    )
+
+
+def scen_level_sensor_oxidation_false_positive():
+    """Окисление контактов > порога: ложные срабатывания. HEADS может закончиться
+    раньше времени (false positive) ИЛИ позже (drop-outs при реальном trigger).
+    Sim должен survive (DONE)."""
+    def inject(s, c, t):
+        if t == 1:
+            # Симулируем «грязные контакты» — высокий уровень окисления
+            s.level_sensor_heads.s.oxidation_level = 0.85
+
+    return Scenario(
+        name="окисление контактов датчика → sim survives",
+        max_sim_s=15000,
+        inject=inject,
+        check=lambda s, c: (
+            c.st.phase == Phase.DONE,
+            f"phase={c.st.phase.value} oxidation="
+            f"{s.level_sensor_heads.s.oxidation_level:.2f}",
+        ),
+    )
+
+
 SCENARIOS = [
     # Базовые
     scen_happy_reflux_1p5in(),
@@ -488,6 +543,11 @@ SCENARIOS = [
     scen_bimetal_safety(),
     scen_kub_overheat(),
     scen_acknowledge(),
+
+    # Level sensor (БКУ сифонный transfer + контактный датчик)
+    scen_level_sensor_primary(),
+    scen_level_sensor_stuck_open(),
+    scen_level_sensor_oxidation_false_positive(),
 
     # Decision-driving
     scen_column_dimensions(),
