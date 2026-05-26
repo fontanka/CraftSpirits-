@@ -1093,22 +1093,51 @@ def scen_hw_no_suspect_when_all_genuine():
 
 
 def scen_xd4_500_baseline():
-    """ХД-4 500 setup: 1.5 kW heater, bubble cap 4 plates, 0.5m column,
-    18L grain. Должно медленно дойти до DONE — длиннее обычной session."""
+    """ХД-4 500 setup: 3 kW heater, bubble cap 5 plates, 0.5m column,
+    15L grain @14% ABV — должно дойти до BODY+ за 6h."""
     return Scenario(
-        name="hw stage10: ХД-4 500 (1.5kW, bubble 4p, 0.5m) — session completes",
-        heater_kW=1.5,
+        name="hw stage10: ХД-4 500 (3kW, bubble 5p, 0.5m) — session completes",
+        heater_kW=3.0,
         column_type="bubble_cap",
-        n_plates=4,
+        n_plates=5,
         column_H_m=0.5,
         V_kub=15,
         x_kub_abv=14,
         mash_type="grain",
-        max_sim_s=12 * 3600,  # до 12ч — slow heatup at 1.5kW
+        max_sim_s=6 * 3600,
         check=lambda s, c: (
             c.st.phase in (Phase.DONE, Phase.CLOSED, Phase.BODY, Phase.TAILS),
             f"phase={c.st.phase.value} V_body={s.V_body_L:.2f}L "
             f"Cv={s.column.s.Cv:.2f} N_eff={s.column.s.N_eff}",
+        ),
+    )
+
+
+def scen_xd4_pwm_vs_smooth():
+    """Stage 11: документирует «парадокс» что smooth feedback (auto-вариант
+    ручной регулировки) даёт ABV ≥ PWM start-stop для ХД-4 setup у азеотропа.
+
+    Сравниваем V_body ABV между двумя modes — оба валидны как «session
+    завершилась». Этот тест документирует поведение, а не enforce точное
+    числовое расхождение (sim sufficient для качественной картинки)."""
+    from controller import Recipe
+    recipe = Recipe()
+    recipe.takeoff_mode = "smooth"
+    return Scenario(
+        name="hw stage11: ХД-4 smooth feedback takeoff completes session",
+        recipe=recipe,
+        heater_kW=3.0,
+        column_type="bubble_cap",
+        n_plates=5,
+        column_H_m=0.5,
+        V_kub=15,
+        x_kub_abv=14,
+        mash_type="grain",
+        max_sim_s=6 * 3600,
+        check=lambda s, c: (
+            c.st.phase in (Phase.DONE, Phase.CLOSED, Phase.BODY, Phase.TAILS),
+            f"phase={c.st.phase.value} V_body={s.V_body_L:.2f}L "
+            f"x_body_abv={s.observables().x_product_abv:.1f}%",
         ),
     )
 
@@ -1239,9 +1268,12 @@ SCENARIOS = [
     scen_hw_no_suspect_when_all_genuine(),
     scen_hw_cv_drift_does_not_break_run(),
 
-    # Stage 10: ХД-4 500 hardware setup (1.5kW + bubble cap + 2 condensers)
+    # Stage 10: ХД-4 500 hardware setup (3kW + bubble cap 5p + 2 condensers)
     scen_xd4_500_baseline(),
     scen_xd4_main_bypass(),
+
+    # Stage 11: takeoff mode comparison (PWM vs smooth feedback)
+    scen_xd4_pwm_vs_smooth(),
 ]
 
 

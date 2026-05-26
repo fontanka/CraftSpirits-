@@ -202,8 +202,17 @@
             <input id="column_H_m" type="number" value="1.0" min="0.3" max="2.0" step="0.1" class="small-input" />
           </div>
         </div>
+        <div class="row" style="margin-top: 4px;">
+          <div>
+            <label>Takeoff mode</label>
+            <select id="takeoff_mode" class="small-input">
+              <option value="pwm" selected>PWM start-stop</option>
+              <option value="smooth">smooth feedback (как рукой)</option>
+            </select>
+          </div>
+        </div>
         <div style="margin-top: 4px;">
-          <button id="preset-xd4" class="small" style="width:100%;">📋 ХД-4 500 preset (1.5kW, bubble, 4 plates, 0.5m)</button>
+          <button id="preset-xd4" class="small" style="width:100%;">📋 ХД-4 500 preset (3kW, bubble, 5 plates, 0.5m)</button>
         </div>
       </div>
       <div style="margin-top: 8px;">
@@ -614,10 +623,11 @@ function connectWS() {
 
 // Wire UI
 document.getElementById('preset-xd4').onclick = () => {
-  document.getElementById('heater_kW').value = 1.5;
+  document.getElementById('heater_kW').value = 3.0;
   document.getElementById('column_type').value = 'bubble_cap';
-  document.getElementById('n_plates').value = 4;
+  document.getElementById('n_plates').value = 5;
   document.getElementById('column_H_m').value = 0.5;
+  document.getElementById('takeoff_mode').value = 'pwm';
 };
 
 document.getElementById('btn-start').onclick = async () => {
@@ -635,6 +645,7 @@ document.getElementById('btn-start').onclick = async () => {
     column_type: document.getElementById('column_type').value,
     n_plates: +document.getElementById('n_plates').value,
     column_H_m: +document.getElementById('column_H_m').value,
+    takeoff_mode: document.getElementById('takeoff_mode').value,
   };
   if (hwEnabled) {
     body.hw = {

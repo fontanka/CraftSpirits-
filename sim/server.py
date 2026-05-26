@@ -59,6 +59,7 @@ class SimEngine:
             "column_type": "packed", # 'packed' | 'bubble_cap'
             "n_plates": 4,           # для bubble_cap
             "column_H_m": 1.0,       # 0.5 для ХД-4 500
+            "takeoff_mode": "pwm",   # 'pwm' | 'smooth' (stage 11)
         }
         self._hw_opts: dict = {}
         self._recipe = Recipe()
@@ -113,6 +114,8 @@ class SimEngine:
         # Sync heater rating into Recipe so PZEM-style cmd-vs-meas check
         # uses correct max power
         self._recipe.heater_max_kW = self._cfg.get("heater_kW", 5.0)
+        # Stage 11: takeoff mode (pwm | smooth)
+        self._recipe.takeoff_mode = self._cfg.get("takeoff_mode", "pwm")
         self.controller = Controller(self._recipe)
         self.controller.start(0.0, initial_sensors=self.still.read_sensors())
         self.history.clear()
@@ -307,6 +310,7 @@ class StartReq(BaseModel):
     column_type: str | None = None
     n_plates: int | None = None
     column_H_m: float | None = None
+    takeoff_mode: str | None = None
     hw: dict | None = None
 
 

@@ -123,8 +123,19 @@ class Recipe:
     power_mismatch_kW: float = 0.5  # порог |P_set - P_meas|
     power_mismatch_dwell_s: int = 10  # сколько секунд держаться, чтобы триггернуть
     # Stage 10: hardware ration heater (для PZEM cmd-vs-meas check).
-    # ХД-4 500 setup: 1.5 kW. Generic ректификатор: 5 kW.
+    # ХД-4 500 setup: 3 kW. Generic ректификатор: 5 kW.
     heater_max_kW: float = 5.0
+
+    # Stage 11: takeoff control mode (см. forum discussion auto vs manual ABV).
+    # 'pwm'    — классический start-stop с duty_body, фиксированный период
+    # 'smooth' — плавная пропорциональная регулировка через partial-open valve
+    #            (требует PWM-fast или regulator), feedback по T_head
+    takeoff_mode: str = "pwm"
+    # Smooth mode: target T_head, при превышении — снижение duty (P-controller)
+    smooth_target_T_head_C: float = 78.4   # сразу над азеотропом
+    smooth_kp: float = 0.25                # 1°C превышения → −25% duty
+    smooth_duty_min: float = 0.02
+    smooth_duty_max: float = 0.50
 
     # === Третья волна ресёрча (см. 12.13.11) ===
 
@@ -692,8 +703,16 @@ class Controller:
 
         elif st.phase == Phase.BODY:
             outs.heater_power = r.p_work / 100.0 * power_scale
-            self.duty_current = r.duty_body
-            outs.valve_takeoff = self._pwm(t_sim, r.duty_body, r.pwm_period_s)
+            # Stage 11: takeoff_mode='smooth' использует P-controller по T_head
+            # вместо фиксированного PWM. Это эмулирует ручную регулировку
+            # «по температуре в узле отбора», даёт лучше ABV у азеотропа.
+            if r.takeoff_mode == "smooth":
+                duty = self._smooth_duty(t_head_corr)
+                self.duty_current = duty
+                outs.valve_takeoff = self._pwm(t_sim, duty, 5.0)  # быстрый PWM 5с
+            else:
+                self.duty_current = r.duty_body
+                outs.valve_takeoff = self._pwm(t_sim, r.duty_body, r.pwm_period_s)
 
             # Конец тела: T_head стабильно выше порога t_dwell сек
             t_head_over = (
@@ -781,3 +800,19 @@ class Controller:
         t_in_period = (t_sim - self.st.pwm_phase_start) % period
         t_open = duty * period
         return t_in_period < t_open
+
+    def _smooth_duty(self, t_head_C: float) -> float:
+        """Stage 11: P-controller для smooth takeoff mode.
+        Если T_head выше target — уменьшаем duty (меньше отбора → больше reflux
+        → выше ABV в продукте). Этим эмулируем «руками регулирую охлаждение»:
+        оператор давит ABV у самого азеотропа, недотбирая product.
+
+        Возвращает duty [smooth_duty_min .. smooth_duty_max]."""
+        r = self.r
+        if math.isnan(t_head_C):
+            return r.smooth_duty_min
+        # T_head выше target → product «грязнее» → reduce duty
+        error_C = t_head_C - r.smooth_target_T_head_C
+        # Базовый duty 25%, корректируем error × kp
+        duty = 0.25 - r.smooth_kp * error_C
+        return max(r.smooth_duty_min, min(r.smooth_duty_max, duty))
