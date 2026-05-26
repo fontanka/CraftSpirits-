@@ -25,7 +25,10 @@ from enum import Enum
 
 @dataclass
 class LevelSensorState:
-    """Контактный датчик уровня в приёмнике голов (поплавковый/герконовый)."""
+    """Контактный кондуктометрический щуп уровня в приёмнике голов (БКУ-07
+    от russsam.ru, артикул «датчик наполнения автомат отбора 07», цена ~1060₽,
+    щуп 70×10mm, 2m кабель). Жидкость замыкает 2 электрода щупа → contact
+    closed = «уровень достигнут»."""
     raw_signal: bool = False
     debounced_signal: bool = False
     last_change_t: float = 0.0
@@ -36,11 +39,17 @@ class LevelSensorState:
 
 
 class LevelSensor:
-    """Контактный датчик уровня с реалистичными failure modes (см. 12.12):
+    """Контактный кондуктометрический щуп БКУ-07 (russsam.ru) с failure modes:
     1. Окисление контактов (BKU-099 thread): растёт со временем экспозиции
-    2. Mechanical sticking — поплавок зацепился
-    3. Bouncing / chatter
-    4. False positive — splash при сильном отборе
+       в спиртовых парах. Оператор чистит наждачкой перед каждой сессией.
+    2. Mechanical sticking — щуп подвисает или коромысло БКУ не до конца
+       опрокинулось.
+    3. Bouncing / chatter — особенно при чистых головах (90+% ABV проводит
+       хуже воды → нестабильное замыкание).
+    4. False positive — splash при сильном отборе или капля на щупе.
+
+    Подключение к ESP: один pin как digital input с pull-up, второй —
+    GND. Замыкается через жидкость (~0.5-5 kΩ зависит от ABV).
     """
 
     OXIDATION_FAILURE_THRESHOLD = 0.8

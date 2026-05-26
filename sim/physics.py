@@ -810,8 +810,13 @@ class StillObservables:
 class Still:
     """Совмещённая модель куб + колонна + холодильник + узел отбора + приёмники."""
 
-    # Объём приёмника голов до срабатывания сифона (заводская часть БКУ).
-    # 150 мл — типичное значение, можно настроить через self.heads_cup_volume_L.
+    # Объём приёмника голов до срабатывания механизма перевода (БКУ
+    # автоперевод от russsam.ru: коромысло-балансир, не сифон. Стакан-сборник
+    # ловит головы; при наполнении до точки опрокидывания падает в сторону,
+    # сливая в отдельную бутылку; основное приёмное горлышко 40-50mm теперь
+    # принимает тело).
+    # 150 мл — типичное значение для базового устройства, для v2.0 на бутыли
+    # 5/10/20 л — больше. Настраивается через self.heads_cup_volume_L.
     DEFAULT_HEADS_CUP_VOLUME_L: float = 0.150
 
     def __init__(self, column_diameter_m: float = 0.04,
@@ -820,9 +825,11 @@ class Still:
                  n_plates: int = 4,
                  column_H_m: float = 1.0):
         """Конфигурируемый Still. По умолчанию: 1.5" packed ректификация
-        с 5 kW heater. Для ХД-4 500 типового сетапа:
-            Still(column_diameter_m=0.040, heater_kW=1.5,
-                  column_type='bubble_cap', n_plates=4, column_H_m=0.5)
+        с 5 kW heater. Для ХД/4-375 ККС-М (russsam.ru, медная колпачковая,
+        58mm ID, 375mm раб. секция, 5 тарелок, 1" резьба, max 91-92% ABV
+        при R>5) типового сетапа с 3 kW ТЭНом:
+            Still(column_diameter_m=0.058, heater_kW=3.0,
+                  column_type='bubble_cap', n_plates=5, column_H_m=0.375)
         """
         from hardware import LevelSensor
         self.boiler = Boiler()
@@ -1023,9 +1030,11 @@ class Still:
                             self.faults.water_cutoff,
                             m_dot_product_kg_s=m_dot_product)
 
-        # 4. Узел отбора (LM): если клапан открыт, конденсат уходит в активный приёмник.
-        # Механическое сифонное устройство переводит поток heads → body → tails
-        # автоматически (без нашего управления).
+        # 4. Узел отбора (LM): если клапан открыт, конденсат уходит в активный
+        # приёмник. БКУ от russsam.ru: коромысло-балансир (НЕ сифон, как
+        # упрощённо моделировалось ранее) переводит поток heads → body
+        # автоматически по достижению веса жидкости в стакане-сборнике.
+        # Дальше body → tails в кубе после T_kub > 95°C.
         # Hardware integration (stage 8): Cv drift и leak_rate влияют на actual flow.
         if self.realistic_hw_enabled:
             # Cv ratio: heat-soak ×1.5-1.9 → пропорционально больше delivered flow
@@ -1069,8 +1078,10 @@ class Still:
                 V_leak_L = leak_ml_s / 1000 * dt
                 self._add_to_active_receiver(V_leak_L, y_top_mass)
 
-        # 5. Level sensor: видит ли датчик «полно» (после сифонного переключения)
-        # physical_full = True когда сифон сработал И heads cup действительно заполнен
+        # 5. Level sensor (контактный кондуктометрический щуп 70×10mm,
+        # 2m cable, russsam.ru датчик наполнения для БКУ-07; жидкость между
+        # двумя электродами щупа замыкает контакт → controller видит «полно»).
+        # physical_full=True после срабатывания коромысла (переход heads→body).
         physical_full = self.heads_full_flag
         self.level_sensor_heads.step(dt, self.t_sim_s, physical_full)
 
@@ -1084,7 +1095,8 @@ class Still:
 
     def _add_to_active_receiver(self, V_L: float, composition_mass: List[float]):
         """Добавляет жидкость в текущий активный приёмник.
-        Срабатывает сифон при заполнении приёмника голов."""
+        Коромысло-балансир (БКУ) опрокидывается при заполнении стакана голов
+        — поток переключается на главное приёмное горлышко (тело)."""
         if self.active_receiver == "heads":
             new_V = self.V_heads_L + V_L
             if new_V > 0:

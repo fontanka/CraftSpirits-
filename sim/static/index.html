@@ -199,8 +199,15 @@
           </div>
           <div>
             <label>H (m)</label>
-            <input id="column_H_m" type="number" value="1.0" min="0.3" max="2.0" step="0.1" class="small-input" />
+            <input id="column_H_m" type="number" value="1.0" min="0.3" max="2.0" step="0.05" class="small-input" />
           </div>
+        </div>
+        <div class="row" style="margin-top: 4px;">
+          <div>
+            <label>Inner D (mm)</label>
+            <input id="column_D_mm" type="number" value="40" min="20" max="100" step="1" class="small-input" />
+          </div>
+          <div></div>
         </div>
         <div class="row" style="margin-top: 4px;">
           <div>
@@ -623,10 +630,13 @@ function connectWS() {
 
 // Wire UI
 document.getElementById('preset-xd4').onclick = () => {
+  // ХД/4-375 ККС-М: 58mm ID, 375mm раб. секция, 5 колпачковых тарелок,
+  // нерж., 1" резьба. 3 kW ТЭН (твоё). Заявленный max ABV 91-92% при R>5.
   document.getElementById('heater_kW').value = 3.0;
   document.getElementById('column_type').value = 'bubble_cap';
   document.getElementById('n_plates').value = 5;
-  document.getElementById('column_H_m').value = 0.5;
+  document.getElementById('column_H_m').value = 0.375;
+  document.getElementById('column_D_mm').value = 58;
   document.getElementById('takeoff_mode').value = 'pwm';
 };
 
@@ -645,6 +655,7 @@ document.getElementById('btn-start').onclick = async () => {
     column_type: document.getElementById('column_type').value,
     n_plates: +document.getElementById('n_plates').value,
     column_H_m: +document.getElementById('column_H_m').value,
+    column_D_m: +document.getElementById('column_D_mm').value / 1000,
     takeoff_mode: document.getElementById('takeoff_mode').value,
   };
   if (hwEnabled) {
