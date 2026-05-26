@@ -117,6 +117,7 @@
   </span>
   <button id="btn-pause" class="small">⏸ Pause</button>
   <button id="btn-ack" class="small warning">ACK emergency</button>
+  <button id="btn-calibrate" class="small">📐 Calibrate column</button>
   <button id="btn-reset" class="small danger">Reset</button>
   <span style="margin-left:auto; color: var(--muted); font-size: 11px;">
     WS: <span id="ws-state">…</span>
@@ -386,6 +387,11 @@
         <div class="kv"><span class="k">BME680 P_atm</span><span class="v" id="hw-bme-p">—</span></div>
         <div class="kv"><span class="k">BME680 T</span><span class="v" id="hw-bme-t">—</span></div>
         <div class="kv"><span class="k">VOC (atm ppm)</span><span class="v" id="hw-voc-ppm">—</span></div>
+        <div class="kv" style="border-top:1px solid var(--border); margin-top:4px; padding-top:4px"><span class="k">Calibration</span><span class="v" id="cal-status">—</span></div>
+        <div class="kv"><span class="k">Column K</span><span class="v" id="cal-K">—</span></div>
+        <div class="kv"><span class="k">Column τ</span><span class="v" id="cal-tau">—</span></div>
+        <div class="kv"><span class="k">Column θ</span><span class="v" id="cal-theta">—</span></div>
+        <div class="kv"><span class="k">Smooth kp</span><span class="v" id="cal-kp">—</span></div>
       </div>
     </div>
 
@@ -577,6 +583,15 @@ function updateUI(s) {
   document.getElementById('hw-bme-t').textContent = h.bme680_T_C != null ? num(h.bme680_T_C, 1) + ' °C' : '—';
   document.getElementById('hw-voc-ppm').textContent = p.atm_tube_voc_ppm != null ? num(p.atm_tube_voc_ppm, 0) + ' ppm' : '—';
 
+  // Stage 17: column calibration
+  document.getElementById('cal-status').innerHTML = c.calibration_active
+    ? '<span class="badge warn">RUNNING</span>'
+    : (c.calibration_K != null ? '<span class="badge ok">CALIBRATED</span>' : 'uncalibrated');
+  document.getElementById('cal-K').textContent = c.calibration_K != null ? num(c.calibration_K, 2) : '—';
+  document.getElementById('cal-tau').textContent = c.calibration_tau_s != null ? num(c.calibration_tau_s, 0) + ' s' : '—';
+  document.getElementById('cal-theta').textContent = c.calibration_theta_s != null ? num(c.calibration_theta_s, 0) + ' s' : '—';
+  document.getElementById('cal-kp').textContent = c.smooth_kp != null ? num(c.smooth_kp, 3) : '—';
+
   // Alerts
   document.getElementById('n-alerts').textContent = c.n_alerts || 0;
   document.getElementById('alerts-list').innerHTML = (c.alerts || []).slice().reverse()
@@ -691,6 +706,7 @@ document.getElementById('btn-start').onclick = async () => {
 
 document.getElementById('btn-pause').onclick = () => api('/api/pause');
 document.getElementById('btn-ack').onclick = () => api('/api/ack');
+document.getElementById('btn-calibrate').onclick = () => api('/api/calibrate');
 document.getElementById('btn-reset').onclick = () => api('/api/reset');
 
 document.querySelectorAll('.speed-bar button').forEach(b => {

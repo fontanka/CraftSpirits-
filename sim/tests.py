@@ -1142,6 +1142,44 @@ def scen_xd4_pwm_vs_smooth():
     )
 
 
+def scen_column_autocalibration():
+    """Stage 17: запускает step-test calibration после выхода из STABILIZE,
+    проверяет что FOPDT параметры были определены и Recipe их сохранил.
+    Calibration работает в любой active фазе (HEADS/BODY/TAILS)."""
+    def inject(s, c, t):
+        if t == 1:
+            # Запросить calibration — старт когда войдём в STABILIZE/HEADS
+            c.request_calibration(t)
+
+    def check(s, c):
+        # После test должны быть K, τ, θ заполнены и kp перетюнен
+        calibrated = (
+            c.r.column_K_gain is not None
+            and c.r.column_tau_s is not None
+            and c.r.column_theta_s is not None
+        )
+        return (
+            calibrated and c.st.phase in (Phase.DONE, Phase.CLOSED, Phase.BODY,
+                                          Phase.TAILS, Phase.SHUTDOWN),
+            f"phase={c.st.phase.value} K={c.r.column_K_gain} "
+            f"τ={c.r.column_tau_s} θ={c.r.column_theta_s}",
+        )
+
+    return Scenario(
+        name="hw stage17: column autocalibration в BODY phase",
+        heater_kW=3.0,
+        column_type="bubble_cap",
+        n_plates=5,
+        column_H_m=0.375,
+        V_kub=15,
+        x_kub_abv=14,
+        max_sim_s=4 * 3600,
+        inject=inject,
+        check=check,
+    )
+
+
+
 def scen_xd4_main_bypass():
     """ХД-4 500 + main condenser bypass через 30 мин — vapor breaks through
     (не охлаждается), behaviour ближе к pot-still."""
@@ -1274,6 +1312,9 @@ SCENARIOS = [
 
     # Stage 11: takeoff mode comparison (PWM vs smooth feedback)
     scen_xd4_pwm_vs_smooth(),
+
+    # Stage 17: column autocalibration
+    scen_column_autocalibration(),
 ]
 
 

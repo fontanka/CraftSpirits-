@@ -147,6 +147,15 @@ class Recipe:
     water_kp: float = 0.4  # +1°C T_head → +40% water flow
     water_flow_min_lpm: float = 0.5
     water_flow_max_lpm: float = 5.0
+
+    # Stage 17: сохранённая column FOPDT calibration. None → uncalibrated,
+    # controller использует fallback consts. После калибровки эти значения
+    # сохраняются и используются для tune kp при следующих сессиях.
+    column_K_gain: float | None = None
+    column_tau_s: float | None = None
+    column_theta_s: float | None = None
+    # Auto-recalibrate если recipe identifier меняется (mash type, V_kub etc).
+    column_calibration_hash: str = ""
     # Smooth mode: target T_head, при превышении — снижение duty (P-controller)
     smooth_target_T_head_C: float = 78.4   # сразу над азеотропом
     smooth_kp: float = 0.25                # 1°C превышения → −25% duty
@@ -280,6 +289,190 @@ class SuspectSensorAnalyzer:
         return None, ratio
 
 
+@dataclass
+class ColumnFOPDT:
+    """First-Order Plus Dead-Time модель колонны.
+
+    G(s) = K * exp(-θs) / (τ·s + 1)
+
+    К = process gain (°C на единицу control input, например duty%)
+    τ = time constant (sec), 63% steady-state reach time
+    θ = dead time (sec), transport delay + sensor lag
+    """
+    K_gain: float | None = None
+    tau_s: float | None = None
+    theta_s: float | None = None
+    calibrated_at_t: float | None = None
+    fit_quality_R2: float = 0.0     # 0-1, качество fit'а
+    calibrated_recipe_hash: str = ""  # для detecting drift при смене браги
+
+
+class ColumnIdentifier:
+    """Step-test identification колонны для autotuning P-controller.
+
+    Использование:
+    1. start_test(t_sim, baseline_signal, step_amplitude) — начать calibration
+       во время стабильной BODY phase
+    2. process(t, current_signal, t_head) — кормить controller-side каждый tick
+    3. is_done() → True когда test закончен (~30 мин)
+    4. fit_fopdt() → ColumnFOPDT (K, τ, θ из step response)
+    5. imc_tuning(fopdt) → recommended Kp для P-controller
+
+    Метод: Sundaresan-Krishnaswamy (areas method) — robust analytical fit.
+    """
+
+    TEST_DURATION_S = 1800     # 30 минут
+    STEP_HOLD_S = 600          # 10 минут для каждой ступени
+    STEP_AMPLITUDE_PCT = 15    # Δduty 15% для step input
+
+    def __init__(self):
+        self.active = False
+        self.t_start: float | None = None
+        self.baseline_signal: float = 0.0
+        self.step_amplitude: float = 0.0
+        # Time-series: (t, signal, T_head)
+        self.history: list[tuple[float, float, float]] = []
+        self.last_fopdt: ColumnFOPDT | None = None
+
+    def start_test(self, t_sim: float, baseline_signal: float = 0.3,
+                   step_amplitude: float = None):
+        """Начать step-test. baseline_signal — control signal до step
+        (например duty 30%); step_amplitude — на сколько повысить (default
+        15%). Длительность: 30 минут (10 мин на каждый из 3 уровней)."""
+        self.active = True
+        self.t_start = t_sim
+        self.baseline_signal = baseline_signal
+        self.step_amplitude = step_amplitude or (self.STEP_AMPLITUDE_PCT / 100)
+        self.history = []
+
+    def desired_signal(self, t_sim: float) -> float:
+        """Какой control signal должен сейчас выставить controller для test.
+        Pattern: baseline → +step → baseline. Step ступени по STEP_HOLD_S."""
+        if not self.active or self.t_start is None:
+            return self.baseline_signal
+        dt = t_sim - self.t_start
+        if dt < self.STEP_HOLD_S:
+            return self.baseline_signal  # 0-10 min: baseline для stabilization
+        elif dt < 2 * self.STEP_HOLD_S:
+            return self.baseline_signal + self.step_amplitude  # 10-20: +step
+        elif dt < 3 * self.STEP_HOLD_S:
+            return self.baseline_signal  # 20-30: back to baseline
+        else:
+            self.active = False
+            return self.baseline_signal
+
+    def process(self, t_sim: float, current_signal: float, t_head_C: float):
+        """Кормить каждый tick во время теста."""
+        if not self.active:
+            return
+        if math.isnan(t_head_C):
+            return
+        self.history.append((t_sim, current_signal, t_head_C))
+
+    def is_done(self) -> bool:
+        if not self.active and self.t_start is not None:
+            return True
+        if self.t_start is None:
+            return False
+        return (
+            len(self.history) > 0
+            and self.history[-1][0] - self.t_start > self.TEST_DURATION_S
+        )
+
+    def fit_fopdt(self) -> ColumnFOPDT | None:
+        """Извлечь K, τ, θ из записанной history step response.
+
+        Метод Sundaresan-Krishnaswamy (areas method):
+        - K = ΔT_head_steady / ΔSignal
+        - Найти t1 (35.3% rise) и t2 (85.3% rise)
+        - τ ≈ (2/3) × (t2 - t1)
+        - θ ≈ 1.3·t1 - 0.29·t2
+
+        Анализирует только step-up portion (10-20 min от start).
+        """
+        if len(self.history) < 50 or self.t_start is None:
+            return None
+
+        # Найти точки до step (steady-state baseline) и после (steady-state +step)
+        step_start_t = self.t_start + self.STEP_HOLD_S
+        step_end_t = self.t_start + 2 * self.STEP_HOLD_S
+
+        pre_step = [h for h in self.history if h[0] < step_start_t]
+        in_step = [h for h in self.history if step_start_t <= h[0] <= step_end_t]
+        if len(pre_step) < 20 or len(in_step) < 50:
+            return None
+
+        # Steady-state значения (последние 30 секунд каждого участка)
+        T0 = sum(h[2] for h in pre_step[-30:]) / min(30, len(pre_step))
+        T_inf = sum(h[2] for h in in_step[-30:]) / min(30, len(in_step))
+        dT_total = T_inf - T0
+
+        if abs(dT_total) < 0.1:
+            # Слишком слабый response — не получится надёжно зафитить
+            return ColumnFOPDT(K_gain=0, tau_s=300, theta_s=60, fit_quality_R2=0)
+
+        K = dT_total / self.step_amplitude
+
+        # Найти t35 и t85 (35.3% и 85.3% rise)
+        target_35 = T0 + 0.353 * dT_total
+        target_85 = T0 + 0.853 * dT_total
+        t35 = t85 = None
+        for t, _, T in in_step:
+            if t35 is None:
+                cond = (T >= target_35 if dT_total > 0 else T <= target_35)
+                if cond:
+                    t35 = t - step_start_t
+            if t85 is None:
+                cond = (T >= target_85 if dT_total > 0 else T <= target_85)
+                if cond:
+                    t85 = t - step_start_t
+                    break
+
+        if t35 is None or t85 is None or t85 <= t35:
+            return ColumnFOPDT(K_gain=K, tau_s=300, theta_s=60, fit_quality_R2=0.3)
+
+        tau = (2.0 / 3.0) * (t85 - t35)
+        theta = max(0, 1.3 * t35 - 0.29 * t85)
+
+        # R² fit quality — predicted vs actual в step region
+        ss_res = 0.0
+        ss_tot = 0.0
+        for t, _, T in in_step:
+            dt = t - step_start_t
+            if dt < theta:
+                T_pred = T0
+            else:
+                T_pred = T0 + dT_total * (1 - math.exp(-(dt - theta) / max(tau, 1)))
+            ss_res += (T - T_pred) ** 2
+            ss_tot += (T - (T0 + T_inf) / 2) ** 2
+        R2 = max(0, 1 - ss_res / max(ss_tot, 1e-6))
+
+        self.last_fopdt = ColumnFOPDT(
+            K_gain=K, tau_s=tau, theta_s=theta,
+            calibrated_at_t=self.t_start,
+            fit_quality_R2=R2,
+        )
+        return self.last_fopdt
+
+    @staticmethod
+    def imc_tuning(fopdt: ColumnFOPDT, lambda_ratio: float = 1.0) -> dict:
+        """Internal Model Control tuning для P/PI controller.
+        Возвращает {'Kp': ..., 'Ki_per_s': ...} для standard PI.
+
+        lambda_ratio: agressiveness, 1.0 = balanced. Меньше = быстрее но
+        больше overshoot. Больше = медленнее но стабильнее.
+        """
+        if fopdt.K_gain is None or fopdt.tau_s is None or fopdt.theta_s is None:
+            return {"Kp": 0.5, "Ki_per_s": 0}
+        if abs(fopdt.K_gain) < 0.01:
+            return {"Kp": 0.5, "Ki_per_s": 0}
+
+        lam = max(fopdt.tau_s / 3, 2 * fopdt.theta_s) * lambda_ratio
+        Kp = fopdt.tau_s / (fopdt.K_gain * (lam + fopdt.theta_s))
+        Ki = Kp / fopdt.tau_s
+        return {"Kp": Kp, "Ki_per_s": Ki, "lambda_s": lam}
+
+
 class SensorFilter:
     """Per-input filtering. Median-of-3 → EMA. Разные τ под разные сигналы
     (T_head быстро, P_atm медленно, см. 12.13.11 noise-stacking guidance).
@@ -389,6 +582,9 @@ class Controller:
         # счётчики из read_sensors() и flag-ит «далёкий/дохлый» если ratio >5×
         self.suspect_analyzer = SuspectSensorAnalyzer()
         self.suspect_sensor: str | None = None  # последний detected suspect
+        # Stage 17: column identifier для autotuning P-controller
+        self.column_ident = ColumnIdentifier()
+        self.calibration_pending: bool = False  # запрос на calibration
 
     def start(self, t_sim: float, recipe: Recipe | None = None,
               initial_sensors: dict | None = None,
@@ -447,6 +643,23 @@ class Controller:
             self.st.last_alert = ""
             self._add_alert("operator ACK emergency → IDLE")
 
+    def request_calibration(self, t_sim: float):
+        """Stage 17: запрос на step-test column identification. Будет
+        выполнен в текущей или ближайшей BODY phase. Длительность ~30 мин,
+        контроллер генерирует ступенчатые изменения duty_body для записи
+        FOPDT response. После — automatic IMC tuning kp.
+        """
+        if self.st.phase == Phase.BODY:
+            # Уже в BODY — стартуем сразу
+            self.column_ident.start_test(
+                t_sim, baseline_signal=self.r.duty_body, step_amplitude=0.15
+            )
+            self._add_alert(f"{t_sim:.0f}s: column calibration started")
+        else:
+            # Запросить старт при следующем входе в BODY
+            self.calibration_pending = True
+            self._add_alert(f"{t_sim:.0f}s: column calibration queued (waits BODY)")
+
     def _add_alert(self, msg: str):
         self.st.alerts.append(msg)
         if len(self.st.alerts) > self.st._alerts_max:
@@ -495,6 +708,49 @@ class Controller:
                 f"{t_sim:.0f}s: sensor {new_suspect} suspect (×{ratio:.1f} fails)"
             )
         sensors = self.filter.update(sensors, dt)
+
+        # Stage 17: column calibration — может стартовать в любой active фазе
+        # (HEADS/BODY/TAILS/STABILIZE), требует только vapor flow для записи
+        # T_head response. Trigger через request_calibration().
+        active_phases_cal = {Phase.STABILIZE, Phase.HEADS, Phase.STABILIZE2,
+                             Phase.BODY, Phase.TAILS}
+        t_head_now = sensors.get("T_head", float("nan"))
+        if self.calibration_pending and st.phase in active_phases_cal:
+            self.column_ident.start_test(
+                t_sim, baseline_signal=self.r.duty_body, step_amplitude=0.15
+            )
+            self.calibration_pending = False
+            self._add_alert(f"{t_sim:.0f}s: column calibration started")
+
+        if self.column_ident.active and not math.isnan(t_head_now):
+            duty = self.column_ident.desired_signal(t_sim)
+            self.column_ident.process(t_sim, duty, t_head_now)
+
+        # Auto-fit когда test закончился
+        if (self.column_ident.t_start is not None
+                and self.column_ident.is_done()
+                and self.column_ident.last_fopdt is None):
+            fopdt = self.column_ident.fit_fopdt()
+            if fopdt and fopdt.fit_quality_R2 > 0.5:
+                tuning = ColumnIdentifier.imc_tuning(fopdt)
+                old_kp = self.r.smooth_kp
+                self.r.smooth_kp = tuning["Kp"]
+                self.r.column_K_gain = fopdt.K_gain
+                self.r.column_tau_s = fopdt.tau_s
+                self.r.column_theta_s = fopdt.theta_s
+                self._add_alert(
+                    f"{t_sim:.0f}s: column calibrated K={fopdt.K_gain:.2f} "
+                    f"τ={fopdt.tau_s:.0f}s θ={fopdt.theta_s:.0f}s "
+                    f"R²={fopdt.fit_quality_R2:.2f} kp {old_kp:.2f}→{tuning['Kp']:.2f}"
+                )
+            elif fopdt:
+                self.r.column_K_gain = fopdt.K_gain
+                self.r.column_tau_s = fopdt.tau_s
+                self.r.column_theta_s = fopdt.theta_s
+                self._add_alert(
+                    f"{t_sim:.0f}s: column calibration low quality "
+                    f"(R²={fopdt.fit_quality_R2:.2f})"
+                )
 
         if pi_alive:
             st.last_pi_command_at = t_sim
@@ -728,7 +984,6 @@ class Controller:
 
         elif st.phase == Phase.BODY:
             outs.heater_power = r.p_work / 100.0 * power_scale
-            # Stage 11/16: 3 режима управления отбором
             if r.takeoff_mode == "continuous":
                 # Stage 16: клапан спирта всегда OPEN, регулировка через
                 # water flow (servo+needle на main condenser). Manual mode.

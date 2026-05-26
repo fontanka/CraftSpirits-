@@ -235,6 +235,12 @@ class SimEngine:
                 "last_alert": ctrl.st.last_alert,
                 "suspect_sensor": ctrl.suspect_sensor,
                 "suspect_ratio": ctrl.suspect_analyzer.last_ratio,
+                # Stage 17: column calibration
+                "calibration_active": ctrl.column_ident.active,
+                "calibration_K": ctrl.r.column_K_gain,
+                "calibration_tau_s": ctrl.r.column_tau_s,
+                "calibration_theta_s": ctrl.r.column_theta_s,
+                "smooth_kp": ctrl.r.smooth_kp,
             },
             "hardware": {
                 "enabled": s.realistic_hw_enabled,
@@ -358,6 +364,16 @@ async def ack():
     if engine.controller and engine.still:
         engine.controller.acknowledge_emergency()
     return {"ok": True}
+
+
+@app.post("/api/calibrate")
+async def calibrate():
+    """Stage 17: запросить step-test column identification. Запустит ~30 мин
+    test в BODY phase, после авто-тюнинг kp."""
+    if engine.controller and engine.still:
+        engine.controller.request_calibration(engine.still.t_sim_s)
+        return {"ok": True}
+    return {"ok": False, "error": "no session"}
 
 
 class SpeedReq(BaseModel):
