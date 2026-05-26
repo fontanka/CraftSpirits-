@@ -975,6 +975,135 @@ def scen_hw_ssr_overheat_inject_failure():
     )
 
 
+# ============================================================================
+# Stage 8: integration scenarios — hardware effects observable in product flow
+# и controller-side suspect sensor analytics
+# ============================================================================
+
+def scen_hw_cv_drift_increases_product_flow():
+    """Heat-soak Cv > 1.3 → больше product per unit time когда valve открыт.
+    Держим T_coil горячим continuously (valve_takeoff может быть PWM closed
+    в реальности — здесь forсим)."""
+    def inject(s, c, t):
+        if t == 0:
+            s.enable_realistic_hardware()
+        if s.realistic_hw_enabled:
+            s.valve_takeoff_hw.s.T_coil_C = 75.0  # → Cv ≈ ×1.4
+
+    def check(s, c):
+        cv_drift = s.valve_takeoff_hw.s.Cv_effective / s.valve_takeoff_hw.Cv_nominal
+        return (
+            c.st.phase == Phase.DONE and cv_drift > 1.3,
+            f"phase={c.st.phase.value} Cv drift ×{cv_drift:.2f} "
+            f"V_body={s.V_body_L:.2f} L",
+        )
+
+    return Scenario(
+        name="hw stage8: Cv drift влияет на actual product flow",
+        inject=inject,
+        check=check,
+    )
+
+
+def scen_hw_valve_leak_when_closed_adds_product():
+    """Valve dribble (leak_rate>0 при cmd=closed) реально добавляет в receiver.
+    Verify V_product > 0 даже когда controller никогда не открывал valve."""
+    def inject(s, c, t):
+        if t == 0:
+            s.enable_realistic_hardware()
+            # Force большой leak
+            s.valve_takeoff_hw.s.leak_rate_ml_s_when_closed = 2.0  # 2 mL/s
+            s.valve_takeoff_hw.s.seat_debris = True  # +0.5 mL/s extra
+
+    def check(s, c):
+        # Dribble добавляет product только во время phase ⊇ {vapor flowing},
+        # т.е. STABILIZE и далее. За ~3ч vapor-time × leak 2.5mL/s × duty-cycle
+        # closed ≈ накапливается заметное количество (>100 mL).
+        total_product = s.V_heads_L + s.V_body_L
+        return (
+            total_product > 0.1,  # ≥ 100 mL — sanity что leak вообще effective
+            f"phase={c.st.phase.value} V_total={total_product:.2f} L "
+            f"(leaked even when valve was closed)",
+        )
+
+    return Scenario(
+        name="hw stage8: valve dribble добавляет product даже при closed",
+        inject=inject,
+        check=check,
+    )
+
+
+def scen_hw_suspect_sensor_detected():
+    """Прямая инжекция перекошенных CRC counters на T_head. SuspectSensorAnalyzer
+    должен через несколько ticks увидеть ratio >5× и flag-нуть."""
+    def inject(s, c, t):
+        if t == 0:
+            s.enable_realistic_hardware()
+            # Backdoor: имитируем «далёкий/дохлый» сенсор T_head — много CRC fails
+            s.ds18b20_T_head.s.crc_fail_count = 50
+            s.ds18b20_T_kub.s.crc_fail_count = 2
+            s.ds18b20_T_water_in.s.crc_fail_count = 1
+
+    def check(s, c):
+        suspect = c.suspect_sensor
+        return (
+            suspect == "T_head",
+            f"suspect={suspect} ratio={c.suspect_analyzer.last_ratio:.1f}",
+        )
+
+    return Scenario(
+        name="hw stage8: controller detect-ит suspect T_head sensor",
+        inject=inject,
+        max_sim_s=600,  # достаточно нескольких ticks, не полная session
+        check=check,
+    )
+
+
+def scen_hw_no_suspect_when_all_genuine():
+    """Все sensors genuine → suspect_sensor должен остаться None
+    даже после полной сессии."""
+    def inject(s, c, t):
+        if t == 0:
+            s.enable_realistic_hardware()  # all genuine
+
+    def check(s, c):
+        return (
+            c.suspect_sensor is None,
+            f"suspect={c.suspect_sensor} ratio={c.suspect_analyzer.last_ratio:.2f}",
+        )
+
+    return Scenario(
+        name="hw stage8: нет suspect когда все sensors genuine",
+        inject=inject,
+        check=check,
+    )
+
+
+def scen_hw_cv_drift_does_not_break_run():
+    """Sanity: даже когда Cv drift постоянно держится высоким (×1.5),
+    session завершается DONE. Принудительно держим T_coil горячей через
+    весь run injection-ом каждый tick."""
+    def inject(s, c, t):
+        if t == 0:
+            s.enable_realistic_hardware()
+        # Каждый tick форсируем T_coil ~85°C, что даст Cv_factor ≈ 1.6×
+        if s.realistic_hw_enabled:
+            s.valve_takeoff_hw.s.T_coil_C = 85.0
+
+    def check(s, c):
+        cv_ratio = s.valve_takeoff_hw.s.Cv_effective / s.valve_takeoff_hw.Cv_nominal
+        return (
+            c.st.phase == Phase.DONE and cv_ratio > 1.5,
+            f"phase={c.st.phase.value} Cv×{cv_ratio:.2f}",
+        )
+
+    return Scenario(
+        name="hw stage8: persistent Cv drift × 1.5+, session survives",
+        inject=inject,
+        check=check,
+    )
+
+
 SCENARIOS = [
     # Базовые
     scen_happy_reflux_1p5in(),
@@ -1043,6 +1172,14 @@ SCENARIOS = [
     scen_hw_contactor_low_V_chatter(),
     scen_hw_emi_crc_clustering(),
     scen_hw_combined_worst_case(),
+
+    # Stage 8: integration — hardware effects observable in product flow +
+    # controller-side suspect sensor analytics
+    scen_hw_cv_drift_increases_product_flow(),
+    scen_hw_valve_leak_when_closed_adds_product(),
+    scen_hw_suspect_sensor_detected(),
+    scen_hw_no_suspect_when_all_genuine(),
+    scen_hw_cv_drift_does_not_break_run(),
 ]
 
 

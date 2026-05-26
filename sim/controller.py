@@ -194,6 +194,62 @@ class _Median3:
         return sorted(self.buf)[1]
 
 
+class SuspectSensorAnalyzer:
+    """Анализ per-sensor CRC/sentinel counters (см. 12.11.4):
+    если один сенсор имеет >5× fails чем медиана остальных — он suspect
+    ('далёкий' или дохлый).
+
+    Sensors dict приходит из physics.read_sensors() с полями вида
+    ds_T_<name>_crc_fails / ds_T_<name>_sentinels (или None если hardware
+    модели отключены).
+
+    Метод analyze() возвращает (suspect_sensor_name | None, ratio).
+    """
+
+    SUSPECT_RATIO = 5.0
+    MIN_TOTAL_FAILS = 3  # под этим порогом — слишком мало данных
+
+    def __init__(self):
+        self.last_suspect: str | None = None
+        self.last_ratio: float = 0.0
+
+    def analyze(self, sensors: dict) -> tuple[str | None, float]:
+        # Собираем (sensor_name, total_fails)
+        fails: dict[str, int] = {}
+        for key, val in sensors.items():
+            if val is None:
+                continue
+            if key.startswith("ds_") and (key.endswith("_crc_fails")
+                                          or key.endswith("_sentinels")):
+                # ds_T_head_crc_fails → 'T_head'
+                parts = key.split("_")
+                if len(parts) >= 4:
+                    sensor_name = "_".join(parts[1:-2])
+                    fails[sensor_name] = fails.get(sensor_name, 0) + int(val)
+
+        if len(fails) < 2:
+            return None, 0.0
+
+        sorted_fails = sorted(fails.values())
+        median_idx = len(sorted_fails) // 2
+        median_val = max(sorted_fails[median_idx], 1)  # avoid div by 0
+        worst_name = max(fails, key=fails.get)
+        worst_val = fails[worst_name]
+
+        if worst_val < self.MIN_TOTAL_FAILS:
+            return None, 0.0
+
+        ratio = worst_val / median_val
+        if ratio >= self.SUSPECT_RATIO:
+            self.last_suspect = worst_name
+            self.last_ratio = ratio
+            return worst_name, ratio
+
+        self.last_suspect = None
+        self.last_ratio = ratio
+        return None, ratio
+
+
 class SensorFilter:
     """Per-input filtering. Median-of-3 → EMA. Разные τ под разные сигналы
     (T_head быстро, P_atm медленно, см. 12.13.11 noise-stacking guidance).
@@ -299,6 +355,10 @@ class Controller:
         self._last_tick_t: float | None = None
         # T_ambient — берётся из BME280 если есть, дефолт 22°C
         self.t_ambient_C: float = 22.0
+        # Suspect sensor analyzer (stage 8): отслеживает per-sensor CRC/sentinel
+        # счётчики из read_sensors() и flag-ит «далёкий/дохлый» если ratio >5×
+        self.suspect_analyzer = SuspectSensorAnalyzer()
+        self.suspect_sensor: str | None = None  # последний detected suspect
 
     def start(self, t_sim: float, recipe: Recipe | None = None,
               initial_sensors: dict | None = None,
@@ -397,6 +457,13 @@ class Controller:
         else:
             dt = max(t_sim - self._last_tick_t, 1e-3)
         self._last_tick_t = t_sim
+        # Suspect sensor detection — на raw counters (до filter)
+        new_suspect, ratio = self.suspect_analyzer.analyze(sensors)
+        if new_suspect and new_suspect != self.suspect_sensor:
+            self.suspect_sensor = new_suspect
+            self._add_alert(
+                f"{t_sim:.0f}s: sensor {new_suspect} suspect (×{ratio:.1f} fails)"
+            )
         sensors = self.filter.update(sensors, dt)
 
         if pi_alive:

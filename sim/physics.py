@@ -866,8 +866,16 @@ class Still:
         # 4. Узел отбора (LM): если клапан открыт, конденсат уходит в активный приёмник.
         # Механическое сифонное устройство переводит поток heads → body → tails
         # автоматически (без нашего управления).
+        # Hardware integration (stage 8): Cv drift и leak_rate влияют на actual flow.
+        if self.realistic_hw_enabled:
+            # Cv ratio: heat-soak ×1.5-1.9 → пропорционально больше delivered flow
+            cv_ratio = (self.valve_takeoff_hw.s.Cv_effective
+                        / max(self.valve_takeoff_hw.Cv_nominal, 0.01))
+        else:
+            cv_ratio = 1.0
+
         if self.valve_takeoff_open and m_dot_vapor > 0:
-            m_dt = m_dot_vapor * dt
+            m_dt = m_dot_vapor * dt * cv_ratio  # Cv drift влияет
             rho_prod = density_mix_liq(y_top_mass, 60)
             V_dt_L = m_dt / rho_prod * 1000
 
@@ -888,6 +896,18 @@ class Still:
                     self.boiler.s.x_mass = [x/tot for x in self.boiler.s.x_mass]
                 rho_new = density_mix_liq(self.boiler.s.x_mass, self.boiler.s.T_bulk_C)
                 self.boiler.s.V_total_L -= m_dt / rho_new * 1000
+
+        # 4b. Valve leak when closed: dribble продолжает капать в receiver
+        # даже когда controller просит valve closed (FKM swell / seat debris).
+        # Использует ту же composition что и last_y_top — fallback ε если ноль.
+        if (self.realistic_hw_enabled and not self.valve_takeoff_open
+                and m_dot_vapor > 0):
+            leak_ml_s = self.valve_takeoff_hw.s.leak_rate_ml_s_when_closed
+            if self.valve_takeoff_hw.s.seat_debris:
+                leak_ml_s += 0.5
+            if leak_ml_s > 0:
+                V_leak_L = leak_ml_s / 1000 * dt
+                self._add_to_active_receiver(V_leak_L, y_top_mass)
 
         # 5. Level sensor: видит ли датчик «полно» (после сифонного переключения)
         # physical_full = True когда сифон сработал И heads cup действительно заполнен
@@ -1072,7 +1092,16 @@ class Still:
             "valve_takeoff_stiction_N": self.valve_takeoff_hw.s.stiction_force_N if self.realistic_hw_enabled else None,
             "contactor_chatter": self.contactor_hw.s.chatter if self.realistic_hw_enabled else None,
             "contactor_wear": self.contactor_hw.s.contact_wear if self.realistic_hw_enabled else None,
+            # Per-sensor CRC/sentinel counters (12.11.4): controller использует
+            # их для suspect-sensor detection через SuspectSensorAnalyzer.
+            "ds_T_kub_crc_fails": self.ds18b20_T_kub.s.crc_fail_count if self.realistic_hw_enabled else None,
+            "ds_T_kub_sentinels": self.ds18b20_T_kub.s.sentinel_count if self.realistic_hw_enabled else None,
             "ds_T_head_crc_fails": self.ds18b20_T_head.s.crc_fail_count if self.realistic_hw_enabled else None,
             "ds_T_head_sentinels": self.ds18b20_T_head.s.sentinel_count if self.realistic_hw_enabled else None,
-            "ds_T_kub_sentinels": self.ds18b20_T_kub.s.sentinel_count if self.realistic_hw_enabled else None,
+            "ds_T_water_in_crc_fails": self.ds18b20_T_water_in.s.crc_fail_count if self.realistic_hw_enabled else None,
+            "ds_T_water_in_sentinels": self.ds18b20_T_water_in.s.sentinel_count if self.realistic_hw_enabled else None,
+            "ds_T_water_out_crc_fails": self.ds18b20_T_water_out.s.crc_fail_count if self.realistic_hw_enabled else None,
+            "ds_T_water_out_sentinels": self.ds18b20_T_water_out.s.sentinel_count if self.realistic_hw_enabled else None,
+            "ds_T_kub_wall_crc_fails": self.ds18b20_T_kub_wall.s.crc_fail_count if self.realistic_hw_enabled else None,
+            "ds_T_kub_wall_sentinels": self.ds18b20_T_kub_wall.s.sentinel_count if self.realistic_hw_enabled else None,
         }
