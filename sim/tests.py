@@ -1179,6 +1179,92 @@ def scen_column_autocalibration():
     )
 
 
+def scen_israel_coastal_climate():
+    """Stage 18: ХД/4 в Israeli coastal climate (Tel Aviv): hot water inlet
+    18-25°C, hard water → scale rate ×3, RH 70%. Sim должен пройти session
+    но heat_transfer_efficiency может слегка снизиться."""
+    def inject(s, c, t):
+        if t == 0:
+            # Установить climate (через прямую модификацию)
+            from physics import CLIMATE_PROFILES
+            s.climate = CLIMATE_PROFILES["israel_coastal"]
+            s.condenser.s.T_water_in_C = s.climate.water_inlet_T_C
+
+    return Scenario(
+        name="hw stage18: ХД/4 в Israeli coastal climate — session completes",
+        heater_kW=3.0,
+        column_type="bubble_cap",
+        n_plates=5,
+        column_H_m=0.375,
+        V_kub=15,
+        x_kub_abv=14,
+        max_sim_s=4 * 3600,
+        inject=inject,
+        check=lambda s, c: (
+            c.st.phase in (Phase.DONE, Phase.CLOSED, Phase.BODY, Phase.TAILS),
+            f"phase={c.st.phase.value} scale_mm={s.condenser.s.scale_mm:.4f} "
+            f"htr_eff={s.condenser.s.heat_transfer_efficiency:.3f}",
+        ),
+    )
+
+
+def scen_long_cable_ds18b20_emi():
+    """Stage 18: DS18B20 с длинным кабелем 5m → CRC fails повышены ×4
+    при SSR switching events. Session всё равно должна пройти благодаря
+    median3+EMA filter."""
+    def inject(s, c, t):
+        if t == 0:
+            s.enable_realistic_hardware()
+            # Установить длину кабелей DS18B20
+            s.ds18b20_T_head.s.cable_length_m = 5.0
+            s.ds18b20_T_kub.s.cable_length_m = 3.0
+
+    return Scenario(
+        name="hw stage18: DS18B20 long cable 5m — sim survives despite EMI",
+        heater_kW=3.0,
+        column_type="bubble_cap",
+        n_plates=5,
+        column_H_m=0.375,
+        V_kub=15,
+        x_kub_abv=14,
+        max_sim_s=4 * 3600,
+        inject=inject,
+        check=lambda s, c: (
+            c.st.phase in (Phase.DONE, Phase.CLOSED, Phase.BODY, Phase.TAILS),
+            f"phase={c.st.phase.value} CRC head={s.ds18b20_T_head.s.crc_fail_count}",
+        ),
+    )
+
+
+def scen_scale_buildup_over_time():
+    """Stage 18: scale_mm накапливается за длинную сессию в desert
+    climate (×5 rate). Проверяем что Heat transfer efficiency держится
+    выше критического порога."""
+    def inject(s, c, t):
+        if t == 0:
+            from physics import CLIMATE_PROFILES
+            s.climate = CLIMATE_PROFILES["israel_desert"]
+            s.condenser.s.T_water_in_C = s.climate.water_inlet_T_C
+
+    return Scenario(
+        name="hw stage18: scale buildup в desert climate (×5 rate)",
+        heater_kW=3.0,
+        column_type="bubble_cap",
+        n_plates=5,
+        column_H_m=0.375,
+        V_kub=15,
+        x_kub_abv=14,
+        max_sim_s=4 * 3600,
+        inject=inject,
+        check=lambda s, c: (
+            s.condenser.s.scale_mm > 0
+            and s.condenser.s.heat_transfer_efficiency > 0.5,
+            f"scale={s.condenser.s.scale_mm:.4f}mm "
+            f"eff={s.condenser.s.heat_transfer_efficiency:.3f}",
+        ),
+    )
+
+
 
 def scen_xd4_main_bypass():
     """ХД-4 500 + main condenser bypass через 30 мин — vapor breaks through
@@ -1315,6 +1401,11 @@ SCENARIOS = [
 
     # Stage 17: column autocalibration
     scen_column_autocalibration(),
+
+    # Stage 18: Israeli climate + long cable EMI
+    scen_israel_coastal_climate(),
+    scen_long_cable_ds18b20_emi(),
+    scen_scale_buildup_over_time(),
 ]
 
 

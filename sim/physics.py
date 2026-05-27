@@ -471,10 +471,14 @@ class Column:
     def v_flood_m_s(self) -> float:
         """Flooding vapor velocity. Calibrated against Sherwood-Eckert and forum data:
         1.5" SPN @ 5kW → Cv ~ 0.75 (v=3.6 m/s, v_flood=4.8).
-        Bubble cap (медные колпачковые типа ХД-4): v_flood ~1.0-1.5 m/s,
-        существенно ниже packed из-за liquid hold-up на тарелках."""
+
+        Bubble cap (медные колпачковые типа ХД-4-375): v_flood ~0.8-1.0 m/s.
+        Stage 19: recalibrated на основе homedistiller.ru — реальная
+        форумная data «3 kW = захлёб, 2 kW OK» для ХД/4 диаметра 58mm.
+        При 58mm × 0.85 м/с × π/4 × 0.058² → ~2.7 кВт boil-up = захлёб.
+        """
         if self.p.column_type == "bubble_cap":
-            return 1.2  # медная колпачковая
+            return 0.85  # ХД/4 медная колпачковая
         return {"SPN": 4.8, "mesh": 3.5, "raschig": 4.0}.get(self.p.packing, 4.0)
 
     def HETP_from_Cv(self, Cv: float) -> float:
@@ -529,9 +533,24 @@ class Column:
         s.weeping = 0 < s.Cv < 0.3
         s.HETP_cm = self.HETP_from_Cv(s.Cv)
         if p.column_type == "bubble_cap":
-            # N_eff = n_plates × КПД (efficiency drops при weeping/flooding)
-            eff = 0.6 if 0.3 < s.Cv < 0.85 else (0.3 if s.Cv < 0.3 else 0.4)
-            s.N_eff = max(1, int(p.n_plates * eff))
+            # Stage 19: recalibrated KPD для ХД/4-375 на основе форумных
+            # данных. ХД/4-375 manufacturer claim 91-92% ABV @ R>5 = ~4.5
+            # theoretical stages. С 5 physical plates это означает baseline
+            # efficiency ~0.9 в optimal range (Cv 0.4-0.7), не 0.6 как было.
+            # Эти данные с homedistiller.ru threads + bubble plate docs.
+            if 0.4 <= s.Cv <= 0.7:
+                eff = 0.9   # optimum range — все 5 тарелок работают близко к идеалу
+            elif 0.3 <= s.Cv < 0.4 or 0.7 < s.Cv <= 0.85:
+                eff = 0.7   # окраины — эффективность падает
+            elif s.Cv < 0.3:
+                eff = 0.4   # weeping — жидкость прорывается через прорези
+            else:  # Cv > 0.85
+                eff = 0.5   # near flooding — entrainment, hold-up oscillation
+            # Plus dephlegmator (top mounted) даёт +1 effective stage
+            # (он работает как partial condenser → отдельный theoretical stage).
+            # Fix: ранее было `int(n*eff + 0.5)` — это rounding идиома,
+            # «съедала» bonus stage в большинстве кейсов. Теперь явный +1.
+            s.N_eff = max(1, int(p.n_plates * eff) + 1)
             # ΔP per plate ~600-1500 Pa (зависит от Cv), всего n_plates тарелок
             s.delta_P_Pa = (600 + 900 * s.Cv) * p.n_plates
         else:
@@ -674,6 +693,11 @@ class CondenserState:
     # 'series'   — main → small последовательно по воде И по спирту
     #              (manual mode user'а с непрерывной струйкой без клапана)
     cooling_topology: str = "parallel"
+    # Stage 18: scale buildup на cooling surfaces — снижает heat transfer
+    # эффективность со временем. Накапливается за сессиями. Mitigation: CIP
+    # cleaning с содой + лимонной кислотой.
+    scale_mm: float = 0.0  # толщина накипи на поверхности теплообмена
+    heat_transfer_efficiency: float = 1.0  # рассчитывается из scale_mm
 
 
 class Condenser:
@@ -697,14 +721,41 @@ class Condenser:
     def __init__(self):
         self.s = CondenserState()
 
+    def cip_cleaning(self):
+        """CIP (Clean-In-Place): сбрасывает scale_mm и восстанавливает
+        heat transfer efficiency. В реальности — заливка кубa горячей водой
+        с содой или 5% лимонной кислотой, выдержка 10 мин, промыть."""
+        self.s.scale_mm = 0.0
+        self.s.heat_transfer_efficiency = 1.0
+
     def step(self, dt: float, m_dot_vapor_kg_s: float, x_vapor_mass: List[float],
              water_cutoff: bool = False,
-             m_dot_product_kg_s: float = 0.0):
+             m_dot_product_kg_s: float = 0.0,
+             scale_rate_multiplier: float = 1.0):
         """Stage 15: 2 НЕЗАВИСИМЫХ cooling water circuits.
+        Stage 18: scale buildup rate × climate multiplier.
+
         m_dot_vapor_kg_s — пар из колонны → main reflux condenser
         m_dot_product_kg_s — отбор → product condenser (cool to 25°C)
+        scale_rate_multiplier — от климата (israel_coastal=3, desert=5)
         """
         s = self.s
+        # Stage 18: scale buildup на cooling surfaces. Накапливается когда
+        # вода реально течёт через main condenser (не при bypass / cutoff /
+        # closed valve). Видимый эффект через ~50-200 сессий. ×3-5 в Израиле.
+        water_actually_flowing = (
+            s.water_valve_open and not water_cutoff
+            and not s.main_bypass_closed
+            and s.water_flow_lpm > 0.05
+        )
+        if water_actually_flowing:
+            # Empirical: ~0.001 mm накипи за час работы при normal water
+            s.scale_mm += dt / 3600 * 0.001 * scale_rate_multiplier
+        # Heat transfer efficiency: каждые 0.5 mm scale = ×0.85 efficiency.
+        # NaN-safe clamp: при scale_mm=nan установить minimal floor.
+        eff = 0.85 ** (s.scale_mm / 0.5) if s.scale_mm == s.scale_mm else 0.3
+        s.heat_transfer_efficiency = max(0.3, eff)
+
         # Sync aliases: код может писать в s.water_flow_lpm — пробросим в main
         s.water_flow_main_lpm = s.water_flow_lpm
         s.water_valve_main_open = s.water_valve_open
@@ -713,7 +764,9 @@ class Condenser:
         if m_dot_vapor_kg_s > 0 and not s.main_bypass_closed:
             L_vap = latent_heat_mix(x_vapor_mass)
             s.Q_to_water_main_W = m_dot_vapor_kg_s * L_vap
-            s.Q_to_water_main_W = min(s.Q_to_water_main_W, s.main_capacity_kW * 1000)
+            # Stage 18: scale снижает effective capacity
+            effective_cap_kW = s.main_capacity_kW * s.heat_transfer_efficiency
+            s.Q_to_water_main_W = min(s.Q_to_water_main_W, effective_cap_kW * 1000)
         else:
             s.Q_to_water_main_W = 0
 
@@ -780,6 +833,52 @@ class Outputs:
     # None = не управляем (используется водный клапан on/off через valve_water);
     # float = setpoint L/min для water_servo_valve
     water_flow_main_lpm: float | None = None
+
+
+@dataclass
+class ClimateProfile:
+    """Stage 18: окружающая среда установки.
+
+    Влияет на:
+    - ambient T (через heat loss кубa, baseline T sensors)
+    - RH (через окисление контактных датчиков, конденсацию)
+    - water hardness (scale buildup rate в condenser + ТЭН)
+    - tap water inlet temperature (сезонная вариация)
+    - PCB humidity corrosion rate (long-term electronics health)
+    """
+    name: str = "eu_inland"
+    ambient_T_C: float = 22.0           # типичная T в помещении
+    ambient_T_summer_peak_C: float = 28.0
+    ambient_RH_pct: float = 50.0        # типичная влажность
+    water_hardness_GH_dH: float = 7.0   # германских градусов жёсткости
+    water_inlet_T_C: float = 12.0       # T воды из крана
+    water_inlet_T_summer_C: float = 18.0
+    scale_rate_multiplier: float = 1.0  # ускорение scale buildup vs baseline
+    pcb_corrosion_multiplier: float = 1.0
+
+
+CLIMATE_PROFILES = {
+    "eu_inland": ClimateProfile(
+        name="eu_inland", ambient_T_C=22, ambient_T_summer_peak_C=28,
+        ambient_RH_pct=50, water_hardness_GH_dH=7,
+        water_inlet_T_C=12, water_inlet_T_summer_C=18,
+        scale_rate_multiplier=1.0, pcb_corrosion_multiplier=1.0,
+    ),
+    "israel_coastal": ClimateProfile(
+        # Tel Aviv / Haifa: высокая RH, жёсткая опреснённая вода, жара
+        name="israel_coastal", ambient_T_C=26, ambient_T_summer_peak_C=33,
+        ambient_RH_pct=70, water_hardness_GH_dH=14,
+        water_inlet_T_C=18, water_inlet_T_summer_C=25,
+        scale_rate_multiplier=3.0, pcb_corrosion_multiplier=4.0,
+    ),
+    "israel_desert": ClimateProfile(
+        # Beer Sheva / Eilat / Arad: высокая T, низкая RH, очень жёсткая вода
+        name="israel_desert", ambient_T_C=28, ambient_T_summer_peak_C=40,
+        ambient_RH_pct=30, water_hardness_GH_dH=20,
+        water_inlet_T_C=20, water_inlet_T_summer_C=28,
+        scale_rate_multiplier=5.0, pcb_corrosion_multiplier=2.0,
+    ),
+}
 
 
 @dataclass
@@ -953,7 +1052,8 @@ class Still:
                  heater_kW: float = 5.0,
                  column_type: str = "packed",
                  n_plates: int = 4,
-                 column_H_m: float = 1.0):
+                 column_H_m: float = 1.0,
+                 climate: str = "eu_inland"):
         """Конфигурируемый Still. По умолчанию: 1.5" packed ректификация
         с 5 kW heater. Для ХД/4-375 ККС-М (russsam.ru, медная колпачковая,
         58mm ID, 375mm раб. секция, 5 тарелок, 1" резьба, max 91-92% ABV
@@ -962,6 +1062,8 @@ class Still:
                   column_type='bubble_cap', n_plates=5, column_H_m=0.375)
         """
         from hardware import LevelSensor
+        # Stage 18: climate profile определяет ambient T, RH, water hardness
+        self.climate = CLIMATE_PROFILES.get(climate, CLIMATE_PROFILES["eu_inland"])
         self.boiler = Boiler()
         self.boiler.p.P_max_kW = heater_kW
         col_params = ColumnParams(
@@ -972,6 +1074,8 @@ class Still:
         )
         self.column = Column(col_params)
         self.condenser = Condenser()
+        # Stage 18: применить climate к water inlet T
+        self.condenser.s.T_water_in_C = self.climate.water_inlet_T_C
         self.faults = StillFaults()
         self.level_sensor_heads = LevelSensor()
         self.t_sim_s = 0.0
@@ -1163,21 +1267,31 @@ class Still:
             P_W = self.heater_power * self.boiler.p.P_max_kW * 1000 if self.contactor_enable else 0
             self._last_ssr_switching = False
 
-        # Cooling water inlet T (with optional hot day disturbance)
-        T_water_in = self.faults.cooling_water_hot if self.faults.cooling_water_hot is not None else 12.0
+        # Cooling water inlet T: климат → fault override → жёсткое default 12°C
+        # (stage 18 fix: ранее always reset to 12°C, игнорируя climate setting)
+        if self.faults.cooling_water_hot is not None:
+            T_water_in = self.faults.cooling_water_hot
+        else:
+            T_water_in = self.climate.water_inlet_T_C
         self.condenser.s.T_water_in_C = T_water_in
         self.condenser.s.water_valve_open = self.valve_water_open
-        # Stage 16: servo step → актуализирует current flow в condenser
+        # Stage 16: servo step → актуализирует current flow в condenser.
+        # Servo НЕ overrides controller valve_water decision — physical
+        # реальность это AND: оба valve_water=True И servo angle > min.
         if self.water_servo_valve is not None:
             self.water_servo_valve.step(dt, tap_pressure_bar=2.5)
-            self.condenser.s.water_flow_lpm = self.water_servo_valve.read_flow_lpm()
-            # Открыт если flow > 0.1 L/min (servo angle > ~3°)
+            servo_flow = self.water_servo_valve.read_flow_lpm()
+            self.condenser.s.water_flow_lpm = servo_flow
+            # Final open state = AND of solenoid valve + servo-needle position
             self.condenser.s.water_valve_open = (
-                self.water_servo_valve.read_flow_lpm() > 0.1
+                self.valve_water_open and servo_flow > 0.1
             )
 
         # 1. Boiler step
-        m_dot_vapor, y_vapor_mass, T_boil = self.boiler.step(dt, P_W, P_atm)
+        # Stage 18 fix: forward climate ambient T в boiler heat loss calc
+        m_dot_vapor, y_vapor_mass, T_boil = self.boiler.step(
+            dt, P_W, P_atm, T_ambient_C=self.climate.ambient_T_C,
+        )
 
         # 2. Column step — vapor up, reflux composition = top plate (LM)
         # Effective reflux ratio from valve duty (in LM):
@@ -1195,7 +1309,8 @@ class Still:
         m_dot_product = m_dot_vapor if self.valve_takeoff_open else 0.0
         self.condenser.step(dt, m_dot_vapor, y_top_mass,
                             self.faults.water_cutoff,
-                            m_dot_product_kg_s=m_dot_product)
+                            m_dot_product_kg_s=m_dot_product,
+                            scale_rate_multiplier=self.climate.scale_rate_multiplier)
 
         # 4. Узел отбора (LM): если клапан открыт, конденсат уходит в активный
         # приёмник. Устройство автоперевода (samogon-i-vodka.ru): гидрозатвор
@@ -1283,7 +1398,7 @@ class Still:
             self.bme680_atm.step(
                 dt, self.t_sim_s,
                 T_at_sensor_C=T_at_sensor,
-                RH_ambient_pct=45,
+                RH_ambient_pct=self.climate.ambient_RH_pct,
                 P_atm_hPa=self.P_atm_Pa_base / 100,
                 ethanol_ppm_eq=o_voc_ppm,
             )

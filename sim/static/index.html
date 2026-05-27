@@ -208,7 +208,14 @@
             <label>Inner D (mm)</label>
             <input id="column_D_mm" type="number" value="40" min="20" max="100" step="1" class="small-input" />
           </div>
-          <div></div>
+          <div>
+            <label>Climate (stage 18)</label>
+            <select id="climate" class="small-input">
+              <option value="eu_inland" selected>EU inland</option>
+              <option value="israel_coastal">Israel coastal</option>
+              <option value="israel_desert">Israel desert</option>
+            </select>
+          </div>
         </div>
         <div class="row" style="margin-top: 4px;">
           <div>
@@ -689,6 +696,7 @@ document.getElementById('btn-start').onclick = async () => {
     n_plates: +document.getElementById('n_plates').value,
     column_H_m: +document.getElementById('column_H_m').value,
     column_D_m: +document.getElementById('column_D_mm').value / 1000,
+    climate: document.getElementById('climate').value,
     takeoff_mode: document.getElementById('takeoff_mode').value,
   };
   if (hwEnabled) {

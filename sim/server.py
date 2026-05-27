@@ -60,6 +60,7 @@ class SimEngine:
             "n_plates": 4,           # для bubble_cap
             "column_H_m": 1.0,       # 0.5 для ХД-4 500
             "takeoff_mode": "pwm",   # 'pwm' | 'smooth' (stage 11)
+            "climate": "eu_inland",  # stage 18
         }
         self._hw_opts: dict = {}
         self._recipe = Recipe()
@@ -83,6 +84,7 @@ class SimEngine:
             column_type=self._cfg.get("column_type", "packed"),
             n_plates=int(self._cfg.get("n_plates", 4)),
             column_H_m=self._cfg.get("column_H_m", 1.0),
+            climate=self._cfg.get("climate", "eu_inland"),
         )
         self.still.set_initial(
             V_L=self._cfg["V_kub"],
@@ -325,6 +327,7 @@ class StartReq(BaseModel):
     n_plates: int | None = None
     column_H_m: float | None = None
     takeoff_mode: str | None = None
+    climate: str | None = None
     hw: dict | None = None
 
 

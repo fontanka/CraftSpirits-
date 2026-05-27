@@ -327,6 +327,11 @@ class DS18B20State:
     hang_at_zero_crossing: bool = False
     # EMI clustering — флаг что SSR недавно щёлкнул
     last_ssr_switch_t: float = 0.0
+    # Stage 18: cable run length affects EMI susceptibility.
+    # Каждые 2 m → ×2 CRC fail rate во время SSR switching events.
+    # Известные проблемы с ESPHome long-cable DS18B20 setups.
+    cable_length_m: float = 1.0
+    parasitic_power: bool = False  # parasitic mode — нестабильно на длинных кабелях
 
 
 class DS18B20:
@@ -384,11 +389,20 @@ class DS18B20:
             s.last_ssr_switch_t = t_sim
             return 85.0000
 
-        # 5. CRC fail clustering around SSR switching
-        crc_fail_p = 0.00001  # baseline
+        # 5. CRC fail clustering around SSR switching.
+        # Stage 18: cable length увеличивает EMI sensitivity ×2 каждые 2 m.
+        # cable_length_m clamped к ≥1.0 чтобы factor не падал <1 при коротких
+        # тестовых кабелях. Final p clamped к ≤0.95 — даже худший case оставляет
+        # успешный read возможным (без 100% failure forever).
+        effective_cable_m = max(1.0, s.cable_length_m)
+        cable_factor = 2 ** ((effective_cable_m - 1.0) / 2.0)
+        if s.parasitic_power:
+            cable_factor *= 3  # parasitic mode на длинном кабеле = trouble
+        crc_fail_p = 0.00001 * cable_factor
         if ssr_switching:
-            crc_fail_p = 0.05  # 5% chance при switching event
+            crc_fail_p = 0.05 * cable_factor
             s.last_ssr_switch_t = t_sim
+        crc_fail_p = min(0.95, crc_fail_p)
         if random.random() < crc_fail_p:
             s.crc_fail_count += 1
             return float("nan")  # CRC fail — клиент должен retry
