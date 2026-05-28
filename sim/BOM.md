@@ -121,6 +121,134 @@
 
 ---
 
+## Tier breakdown — phased rollout
+
+Если хочется начать с минимума и расширять постепенно:
+
+### Tier 1 — MVP (старт ректификации)
+
+**Что входит**: всё кроме BME680, servo+needle, PZEM. Используются твои текущие
+сенсоры (DS18B20, DS1821 93°C, контактный щуп уровня) + соленоидные клапаны
+on/off без proportional control.
+
+| Категория | Стоимость |
+|---|---|
+| Brain (Pi + ESP32 + accessories) | ₪700 |
+| Sensors (DS18B20 + leak detector + кабели — без BME680) | ₪170 |
+| Actuators (Crydom SSR + heat sink + контактор + snubbers) | ₪260 |
+| Power+Safety (RCD + автомат + БП + корпус + earthing + coating) | ₪780 |
+| UI (без display, WebUI через смартфон) | ₪40 |
+| **Tier 1 TOTAL** | **₪1 950** |
+
+### Tier 2 — Expansion (smooth water + atm pressure + VOC)
+
+Добавляется когда захочешь автоматизировать «руки = 93%» или нужен VOC-based
+heads cut.
+
+| Компонент | Цена |
+|---|---|
+| **BME680 + помпа 5V + 3D-печатный корпус** | ₪260 |
+| **Servo SG90 + игольчатый клапан DN8 + bracket** | ₪200 |
+| (опционально) **PZEM-004T** через I2C | ₪80 |
+| **Tier 2 TOTAL** | **₪460-540** |
+
+### Что ОБЯЗАТЕЛЬНО «заложить» в Tier 1 чтобы Tier 2 встал без переделки
+
+#### Hardware reserved
+| Что | Зачем |
+|---|---|
+| БП 5V 5A (Mean Well RS-25-5) — не понижать до 1A | Запас для servo + помпа |
+| Корпус 300×200×120 — не уменьшать | Место для будущих modul'ов |
+| 6 cable glands (4 used, 2 plugged) | Не вскрывать корпус потом |
+| Conformal coating ВСЕХ PCB сразу | Не разбирать через год |
+| Шинная колодка 10 клемм 4 mm² | Запас для +2 циклов 220V |
+
+#### GPIO reservation на ESP32
+
+**Tier 1 — используется**:
+- GPIO 4 ← 1-Wire (DS18B20 + DS1821)
+- GPIO 5 → контактор
+- GPIO 17 → SSR ТЭН
+- GPIO 18 → соленоид спирта
+- GPIO 19 → соленоид воды (on/off)
+- GPIO 25, 26, 27 ← щупы уровней + leak
+- GPIO 34, 35 ← кнопки ACK + E-stop
+- GPIO 32, 33 → buzzer + LED
+
+**Tier 2 — RESERVED, не использовать**:
+- GPIO 21, 22 ← I2C SDA/SCL (BME680 + PZEM)
+- GPIO 16 → Servo PWM
+- GPIO 14 → Air pump MOSFET
+
+**I2C pull-ups 4.7 kΩ к 3.3V** — установить сразу, даже без BME680.
+
+#### Plumbing reserved
+
+- **T-junction + заглушка** на линии воды дефлегматора в месте будущего needle
+  valve (после регулятора, перед condenser)
+- **¼" штуцер** на атм. трубке дефлегматора после DS1821 — для будущего
+  hose к BME680 housing
+- **4-core кабель** проложить от корпуса до атм. трубки и до water valve
+  ТОЧКИ — хвосты с разъёмами свернуть в корпусе
+
+#### Firmware подготовка (sim уже готов!)
+
+```python
+# Tier 1 setup в server config:
+still.enable_realistic_hardware(
+    atm_gas_sensors=False,      # ← BME680 off
+    water_servo_valve=False,    # ← Servo off
+)
+recipe.water_control_mode = "constant"
+recipe.takeoff_mode = "smooth"  # PWM на spirit valve
+
+# Tier 2 — изменения только в конфиге, не в коде:
+still.enable_realistic_hardware(
+    atm_gas_sensors=True,
+    water_servo_valve=True,
+)
+recipe.water_control_mode = "smooth_pid"
+recipe.takeoff_mode = "continuous"  # Tier 2 главный апгрейд
+```
+
+UI dropdown «Takeoff mode» **уже включает** options для всех режимов.
+
+### Что НЕ экономить в Tier 1 (safety chain)
+
+Эти ₪725 — **non-negotiable** для 3 kW + вода + 230V:
+
+- **RCD 30 mA** ₪150 — защита по утечке (вода в кубе → утечка → удар)
+- **Контактор** ₪80 — hard E-stop через размыкание (не через ESP)
+- **Биметаллический термостат 110°C** на стенке куба ₪40 — последовательно с контактором (independent safety)
+- **Crydom SSR** ₪180 — НЕ Fotek (counterfeit fails)
+- **Heat sink SSR** ₪40 — без него прожарится за час на 13 A
+- **E-stop кнопка NC** ₪80 — физически размыкает контактор, не через MCU
+- **RC snubber'ы** ₪75 (3 шт.) — kickback suppression на соленоидах
+- **Conformal coating** ₪80 — Israeli humidity 70%+
+- **Заземление PE** на ВСЕ metal: куб, колонну, дефлегматор, корпус, шины
+
+### Порядок добавления Tier 2
+
+Каждый upgrade независимый — можно по одному в любом порядке:
+
+1. **Servo+needle на воду** (₪200, 1 день работы)
+   - Smooth proportional cooling control
+   - Эмулирует ручник → +0.5-1% ABV expected
+   - Включается флагом `recipe.water_control_mode = "smooth_pid"`
+
+2. **BME680 + помпа** (₪260, 1 день)
+   - Atm pressure → baro-correction T_head
+   - VOC index → confirmatory heads cut + breakthrough warning
+   - Ambient T/RH → climate-aware ops
+   - Включается флагом `still.enable_realistic_hardware(atm_gas_sensors=True)`
+
+3. **PZEM-004T** (₪80, 30 минут установки)
+   - Cmd-vs-measured power check
+   - Plug-and-play через тот же I2C bus
+
+---
+
+
 ## Электрическая схема (текстом)
 
 ```
